@@ -1,0 +1,101 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      pdfcraft_tag:
+        description: "storytold/pdfcraft release tag (blank = latest)"
+        required: false
+        default: ""
+  schedule:
+    # Every day 03:17 UTC: rebuild only if upstream published a new release.
+    - cron: "17 3 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-apk
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      UPSTREAM: storytold/pdfcraft
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pick upstream PdfCraft release
+        id: up
+        run: |
+          TAG="${{ github.event.inputs.pdfcraft_tag }}"
+          if [ -z "$TAG" ]; then
+            TAG=$(gh api "repos/$UPSTREAM/releases/latest" --jq .tag_name)
+          fi
+          VER="${TAG#v}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "ver=$VER" >> "$GITHUB_OUTPUT"
+          echo "Upstream: $TAG"
+          SKIP=false
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            if gh release list -R "$GITHUB_REPOSITORY" -L 100 --json tagName --jq '.[].tagName' | grep -q "^v$VER-"; then
+              SKIP=true
+              echo "Already built for $TAG, nothing to do."
+            fi
+          fi
+          echo "skip=$SKIP" >> "$GITHUB_OUTPUT"
+
+      - name: Download web build
+        if: steps.up.outputs.skip == 'false'
+        run: |
+          mkdir -p /tmp/web
+          gh release download "${{ steps.up.outputs.tag }}" -R "$UPSTREAM" -p 'pdfcraft-web-*.zip' -D /tmp/web
+          unzip -q /tmp/web/*.zip -d /tmp/web/x
+          SRC=$(dirname "$(find /tmp/web/x -name index.html | head -1)")
+          rm -rf app/src/main/assets/www
+          mkdir -p app/src/main/assets/www
+          cp -r "$SRC"/. app/src/main/assets/www/
+          rm -f app/src/main/assets/www/.htaccess app/src/main/assets/www/_headers
+          du -sh app/src/main/assets/www
+          ls app/src/main/assets/www
+
+      - uses: actions/setup-java@v4
+        if: steps.up.outputs.skip == 'false'
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+        if: steps.up.outputs.skip == 'false'
+        with:
+          gradle-version: "8.11.1"
+
+      - name: Build release APK
+        if: steps.up.outputs.skip == 'false'
+        run: |
+          base64 -d keystore.b64 > release.jks
+          gradle --no-daemon :app:assembleRelease \
+            -PupstreamVersion="${{ steps.up.outputs.ver }}" \
+            -PbuildNumber="${{ github.run_number }}"
+          OUT="PdfTools-${{ steps.up.outputs.ver }}-b${{ github.run_number }}.apk"
+          cp app/build/outputs/apk/release/app-release.apk "$OUT"
+          echo "APK=$OUT" >> "$GITHUB_ENV"
+          ls -lh "$OUT"
+
+      - uses: actions/upload-artifact@v4
+        if: steps.up.outputs.skip == 'false'
+        with:
+          name: apk
+          path: ${{ env.APK }}
+
+      - name: Publish GitHub Release
+        if: steps.up.outputs.skip == 'false'
+        run: |
+          TAG="v${{ steps.up.outputs.ver }}-b${{ github.run_number }}"
+          gh release create "$TAG" "$APK" \
+            --title "PDF Tools $TAG" \
+            --notes "Built from [$UPSTREAM ${{ steps.up.outputs.tag }}](https://github.com/$UPSTREAM/releases/tag/${{ steps.up.outputs.tag }}) web build, commit ${{ github.sha }}."
