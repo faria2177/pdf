@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:material_ui/material_ui.dart';
 
 import '../services/file_service.dart';
@@ -257,12 +259,13 @@ class _HomePageState extends State<HomePage> {
                 return ListTile(
                   leading: const Icon(Icons.description_outlined),
                   title: Text(r.name, maxLines: 1, overflow: TextOverflow.ellipsis),
-                  subtitle: Text(_ago(r.openedAt)),
+                  subtitle: Text('${_size(r.path)}${_ago(r.openedAt)}'),
                   onTap: () => openPdfInViewer(context, r.path, name: r.name),
+                  onLongPress: () => _recentActions(r),
                   trailing: IconButton(
-                    tooltip: 'Remove',
-                    icon: const Icon(Icons.close),
-                    onPressed: () => RecentStore.instance.remove(r),
+                    tooltip: 'Options',
+                    icon: const Icon(Icons.more_vert),
+                    onPressed: () => _recentActions(r),
                   ),
                 );
               },
@@ -271,6 +274,102 @@ class _HomePageState extends State<HomePage> {
         ],
       ),
     );
+  }
+
+  static String _size(String path) {
+    try {
+      final b = File(path).lengthSync();
+      final s = b < 1024 * 1024 ? '${(b / 1024).toStringAsFixed(0)} KB' : '${(b / 1024 / 1024).toStringAsFixed(1)} MB';
+      return '$s · ';
+    } catch (_) {
+      return '';
+    }
+  }
+
+  // ---------------------------------------------------------------- recent item actions
+
+  void _recentActions(RecentFile r) {
+    showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (sheet) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
+              child: Text(r.name,
+                  maxLines: 2, overflow: TextOverflow.ellipsis, style: Theme.of(sheet).textTheme.titleMedium),
+            ),
+            ListTile(
+              leading: const Icon(Icons.drive_file_rename_outline),
+              title: const Text('Rename'),
+              onTap: () {
+                Navigator.pop(sheet);
+                _rename(r);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.share_outlined),
+              title: const Text('Share'),
+              onTap: () {
+                Navigator.pop(sheet);
+                _shareRecent(r);
+              },
+            ),
+            ListTile(
+              leading: Icon(Icons.delete_outline, color: Theme.of(sheet).colorScheme.error),
+              title: Text('Delete', style: TextStyle(color: Theme.of(sheet).colorScheme.error)),
+              onTap: () {
+                Navigator.pop(sheet);
+                _delete(r);
+              },
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _rename(RecentFile r) async {
+    final current = FileService.withoutExtension(r.name);
+    final v = await askText(context, title: 'Rename', initial: current, hint: 'File name', okLabel: 'Rename');
+    final name = v?.trim() ?? '';
+    if (name.isEmpty || name == current || !mounted) return;
+    try {
+      final updated = await RecentStore.instance.rename(r, name);
+      if (mounted) toast(context, 'Renamed to ${updated.name}');
+    } catch (e) {
+      if (mounted) toast(context, "Couldn't rename: $e");
+    }
+  }
+
+  Future<void> _shareRecent(RecentFile r) async {
+    final f = File(r.path);
+    if (!f.existsSync()) {
+      toast(context, 'File not found');
+      await RecentStore.instance.remove(r, deleteFile: false);
+      return;
+    }
+    try {
+      await FileService.shareBytes([(await f.readAsBytes(), r.name)]);
+    } catch (e) {
+      if (mounted) toast(context, "Couldn't share: $e");
+    }
+  }
+
+  Future<void> _delete(RecentFile r) async {
+    final ok = await confirm(
+      context,
+      '"${r.name}" will be deleted from this app. '
+      'The original file you opened (in Downloads, WhatsApp, etc.) is not touched.',
+      ok: 'Delete',
+      title: 'Delete file?',
+    );
+    if (!ok) return;
+    await RecentStore.instance.remove(r);
+    if (mounted) toast(context, 'Deleted ${r.name}');
   }
 
   static String _ago(DateTime t) {

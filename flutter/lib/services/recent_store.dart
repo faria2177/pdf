@@ -66,6 +66,28 @@ class RecentStore extends ChangeNotifier {
     await _save();
   }
 
+  /// Renames the entry and its file in app storage. Returns the updated entry.
+  Future<RecentFile> rename(RecentFile item, String newName) async {
+    var name = newName.trim().replaceAll(RegExp(r'[\\/:*?"<>|\x00-\x1f]'), '_');
+    if (!name.toLowerCase().endsWith('.pdf')) name = '$name.pdf';
+    final old = File(item.path);
+    final stamp = DateTime.now().millisecondsSinceEpoch;
+    final newPath = '${old.parent.path}${Platform.pathSeparator}${stamp}_$name';
+    var path = item.path;
+    if (old.existsSync()) {
+      path = (await old.rename(newPath)).path;
+    }
+    final updated = RecentFile(path: path, name: name, openedAt: item.openedAt);
+    final i = _items.indexWhere((e) => e.path == item.path);
+    if (i >= 0) {
+      _items[i] = updated;
+    } else {
+      _items.insert(0, updated);
+    }
+    await _save();
+    return updated;
+  }
+
   Future<void> clear() async {
     for (final e in _items) {
       _deleteQuietly(e.path);
