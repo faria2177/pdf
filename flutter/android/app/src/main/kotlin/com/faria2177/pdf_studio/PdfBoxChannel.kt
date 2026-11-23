@@ -2,16 +2,20 @@ package com.faria2177.pdf_studio
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Matrix
 import android.os.Handler
 import android.os.Looper
 import com.tom_roush.pdfbox.android.PDFBoxResourceLoader
 import com.tom_roush.pdfbox.cos.COSBase
 import com.tom_roush.pdfbox.pdmodel.PDDocument
+import com.tom_roush.pdfbox.pdmodel.PDPageContentStream
 import com.tom_roush.pdfbox.pdmodel.PDResources
 import com.tom_roush.pdfbox.pdmodel.encryption.AccessPermission
 import com.tom_roush.pdfbox.pdmodel.encryption.StandardProtectionPolicy
 import com.tom_roush.pdfbox.pdmodel.graphics.form.PDFormXObject
 import com.tom_roush.pdfbox.pdmodel.graphics.image.JPEGFactory
+import com.tom_roush.pdfbox.pdmodel.graphics.image.LosslessFactory
 import com.tom_roush.pdfbox.pdmodel.graphics.image.PDImageXObject
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.MethodCall
@@ -39,6 +43,7 @@ class PdfBoxChannel(context: Context, messenger: BinaryMessenger) {
                     val value: Any? = when (call.method) {
                         "protect" -> protect(call)
                         "compress" -> compress(call)
+                        "stamp" -> stamp(call)
                         else -> {
                             main.post { result.notImplemented() }
                             return@execute
@@ -142,6 +147,42 @@ class PdfBoxChannel(context: Context, messenger: BinaryMessenger) {
             doc.save(File(output))
         }
         return mapOf("images" to found, "replaced" to replaced, "size" to File(output).length())
+    }
+
+    /**
+     * Draws transparent PNG overlays (made by the Flutter editor, in the page's displayed
+     * orientation) on top of pages. The original page content stays vector and untouched.
+     * stamps: [{page: 0-based index, path: png}]
+     */
+    private fun stamp(call: MethodCall): Map<String, Any> {
+        val input = call.argument<String>("input")!!
+        val output = call.argument<String>("output")!!
+        val stamps = call.argument<List<Map<String, Any>>>("stamps")!!
+        load(input, call.argument("password")).use { doc ->
+            for (s in stamps) {
+                val index = (s["page"] as Number).toInt()
+                val path = s["path"] as String
+                if (index < 0 || index >= doc.numberOfPages) continue
+                val page = doc.getPage(index)
+                var bmp = BitmapFactory.decodeFile(path) ?: continue
+                val rotation = ((page.rotation % 360) + 360) % 360
+                if (rotation != 0) {
+                    // Overlay was drawn upright as displayed; undo the page rotation for user space.
+                    val m = Matrix().apply { postRotate(-rotation.toFloat()) }
+                    val r = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true)
+                    if (r !== bmp) bmp.recycle()
+                    bmp = r
+                }
+                val img = LosslessFactory.createFromImage(doc, bmp)
+                bmp.recycle()
+                val box = page.cropBox
+                PDPageContentStream(doc, page, PDPageContentStream.AppendMode.APPEND, true, true).use { cs ->
+                    cs.drawImage(img, box.lowerLeftX, box.lowerLeftY, box.width, box.height)
+                }
+            }
+            doc.save(File(output))
+        }
+        return mapOf("size" to File(output).length())
     }
 
     /** Returns a smaller JPEG copy of [img], or null to keep the original. */

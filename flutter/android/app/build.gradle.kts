@@ -51,4 +51,6 @@ flutter {
 dependencies {
     // Encryption ("Protect a PDF") and image recompression ("Compress a PDF").
     implementation("com.tom-roush:pdfbox-android:2.0.27.0")
+    // OCR (Tesseract 5 + Leptonica), from JitPack.
+    implementation("cz.adaptech.tesseract4android:tesseract4android:4.9.0")
 }

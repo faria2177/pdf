@@ -1,4 +1,6 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Only used to download OCR language files on request. -->
+    <uses-permission android:name="android.permission.INTERNET"/>
     <application
         android:label="PDF Studio"
         android:name="${applicationName}"
