@@ -3,6 +3,9 @@ name: Build APK
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - "flutter/**"
+      - ".github/workflows/build-flutter.yml"
   workflow_dispatch:
     inputs:
       pdfcraft_tag:
