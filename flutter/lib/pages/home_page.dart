@@ -4,7 +4,10 @@ import '../services/file_service.dart';
 import '../services/intent_service.dart';
 import '../services/recent_store.dart';
 import '../widgets/dialogs.dart';
+import 'compress_page.dart';
 import 'organize_page.dart';
+import 'protect_page.dart';
+import 'redact_page.dart';
 import 'split_page.dart';
 import 'viewer_page.dart';
 
@@ -94,6 +97,45 @@ class _HomePageState extends State<HomePage> {
     ));
   }
 
+  /// Picks a PDF, then opens [builder]'s page for it.
+  Future<void> _pickThen(Widget Function(String path, String name) builder) async {
+    final f = await FileService.pickPdf();
+    if (f == null || !mounted) return;
+    await Navigator.of(context).push(MaterialPageRoute(builder: (_) => builder(f.path, f.name)));
+  }
+
+  void _more() {
+    showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (sheet) {
+        Widget tile(IconData icon, String title, String subtitle, Widget Function(String, String) page) => ListTile(
+              leading: Icon(icon, color: Theme.of(sheet).colorScheme.primary),
+              title: Text(title),
+              subtitle: Text(subtitle),
+              onTap: () {
+                Navigator.pop(sheet);
+                _pickThen(page);
+              },
+            );
+        return SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              tile(Icons.lock_outline, 'Protect a PDF', 'Add a password (AES-256) and permissions',
+                  (path, name) => ProtectPage(path: path, name: name)),
+              tile(Icons.format_color_fill, 'Redact a PDF', 'Permanently black out text and areas',
+                  (path, name) => RedactPage(path: path, name: name)),
+              tile(Icons.compress, 'Compress a PDF', 'Make the file smaller by shrinking images',
+                  (path, name) => CompressPage(path: path, name: name)),
+              const SizedBox(height: 8),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
@@ -104,6 +146,7 @@ class _HomePageState extends State<HomePage> {
       _Tool(Icons.call_split, 'Split PDF', 'Every N pages or by ranges', () => _split(extract: false)),
       _Tool(Icons.content_cut, 'Extract pages', 'Copy chosen pages to a new PDF', () => _split(extract: true)),
       _Tool(Icons.image_outlined, 'Images to PDF', 'Photos and scans to one PDF', _images),
+      _Tool(Icons.more_horiz, 'More', 'Protect, redact, compress', _more),
     ];
 
     return Scaffold(

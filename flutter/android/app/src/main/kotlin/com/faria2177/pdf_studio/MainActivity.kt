@@ -16,12 +16,14 @@ import java.util.concurrent.Executors
  */
 class MainActivity : FlutterActivity() {
     private var channel: MethodChannel? = null
+    private var pdfBox: PdfBoxChannel? = null
     private var initialPath: String? = null
     private var initialConsumed = false
     private val io = Executors.newSingleThreadExecutor()
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        pdfBox = PdfBoxChannel(this, flutterEngine.dartExecutor.binaryMessenger)
         val ch = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
         channel = ch
         ch.setMethodCallHandler { call, result ->
@@ -54,6 +56,7 @@ class MainActivity : FlutterActivity() {
 
     override fun onDestroy() {
         io.shutdown()
+        pdfBox?.dispose()
         super.onDestroy()
     }
 

@@ -16,7 +16,10 @@ PDF Studio is a native Flutter PDF reader and page organizer. Its feature set fo
 | Passwords, permissions, properties | ✅ open protected files, show permissions, "Save without password" |
 | Export | ✅ page as PNG, share, save a copy |
 | Open from other apps | ✅ "Open with" / "Share" from Android |
-| OCR, forms editing, annotations, redaction | ❌ not available in pdfrx |
+| Protect (passwords, permissions) | ✅ AES-256 with an open password, an optional owner password and print/copy/edit limits (PdfBox-Android) |
+| Redact | ✅ draw boxes or find text; marked pages are flattened to images, so the hidden content is removed |
+| Compress | ✅ recompresses images at three levels; text stays vector (PdfBox-Android) |
+| OCR, forms editing, annotations | ❌ not available |
 
 ## Build
 
@@ -46,7 +49,12 @@ lib/
   pages/viewer_page.dart    reader: layouts, search, bookmarks, thumbnails, export, properties
   pages/organize_page.dart  page grid (organize / combine / images to PDF), undo/redo, save
   pages/split_page.dart     split every N, by ranges, extract
+  pages/protect_page.dart   password + permissions (More ▸ Protect)
+  pages/redact_page.dart    draw/find, burn in (More ▸ Redact)
+  pages/compress_page.dart  image recompression (More ▸ Compress)
   services/                 file picking/saving, recent list, passwords, Android intents
   utils/                    page-range parser, image→JPEG→PDF, page→PNG
-android/app/src/main/       manifest (intent filters) + MainActivity.kt (intent channel)
+android/app/src/main/       manifest (intent filters), MainActivity.kt (intent channel),
+                            PdfBoxChannel.kt (protect/compress via PdfBox-Android)
+android/app/build.gradle.kts adds the pdfbox-android dependency
 ```
