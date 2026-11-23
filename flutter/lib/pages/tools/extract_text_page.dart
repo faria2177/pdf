@@ -47,7 +47,12 @@ class _ExtractTextPageState extends PdfToolState<ExtractTextPage> {
   void initState() {
     super.initState();
     OcrService.loadPrefs().then((p) {
-      if (mounted) setState(() => (_langs, _model) = p);
+      if (mounted) {
+        setState(() {
+          _langs = p.$1;
+          _model = p.$2;
+        });
+      }
     });
   }
 

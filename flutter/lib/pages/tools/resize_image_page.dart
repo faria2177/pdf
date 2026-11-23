@@ -1,11 +1,9 @@
 import 'dart:io';
 import 'dart:math' as math;
-import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:archive/archive.dart';
 import 'package:flutter/foundation.dart';
-import 'package:flutter/painting.dart';
 import 'package:jpeg_encode/jpeg_encode.dart';
 import 'package:material_ui/material_ui.dart';
 

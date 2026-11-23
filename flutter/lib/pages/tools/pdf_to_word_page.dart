@@ -1,4 +1,3 @@
-import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
@@ -55,7 +54,7 @@ class _PdfToWordPageState extends PdfToolState<PdfToWordPage> {
       final img = await r.createImage();
       final rgba = (await img.toByteData(format: ui.ImageByteFormat.rawRgba))!.buffer.asUint8List();
       img.dispose();
-      return compute(_jpeg, (rgba, w, h, _highQuality ? 90 : 80));
+      return await compute(_jpeg, (rgba, w, h, _highQuality ? 90 : 80));
     } finally {
       r.dispose();
     }

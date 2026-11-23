@@ -1,4 +1,3 @@
-import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:archive/archive.dart';
@@ -85,7 +84,7 @@ class _PdfToImagesPageState extends PdfToolState<PdfToImagesPage> {
         return (await img.toByteData(format: ui.ImageByteFormat.png))!.buffer.asUint8List();
       }
       final rgba = (await img.toByteData(format: ui.ImageByteFormat.rawRgba))!.buffer.asUint8List();
-      return compute(_jpeg, (rgba, w, h, _quality.round()));
+      return await compute(_jpeg, (rgba, w, h, _quality.round()));
     } finally {
       img.dispose();
     }
