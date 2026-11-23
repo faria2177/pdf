@@ -6,7 +6,17 @@ import '../services/file_service.dart';
 import '../services/intent_service.dart';
 import '../services/recent_store.dart';
 import '../widgets/dialogs.dart';
+import 'package:google_mlkit_document_scanner/google_mlkit_document_scanner.dart';
+
+import '../editor/pdf_editor_page.dart';
+import '../services/thumbnail_service.dart';
 import 'compress_page.dart';
+import 'tools/extract_text_page.dart';
+import 'tools/ocr_page.dart';
+import 'tools/pdf_to_excel_page.dart';
+import 'tools/pdf_to_images_page.dart';
+import 'tools/pdf_to_word_page.dart';
+import 'tools/resize_image_page.dart';
 import 'organize_page.dart';
 import 'protect_page.dart';
 import 'redact_page.dart';
@@ -106,31 +116,128 @@ class _HomePageState extends State<HomePage> {
     await Navigator.of(context).push(MaterialPageRoute(builder: (_) => builder(f.path, f.name)));
   }
 
+  Future<void> _scan() async {
+    final scanner = DocumentScanner(
+      options: DocumentScannerOptions(
+        documentFormats: const {DocumentFormat.pdf},
+        mode: ScannerMode.full,
+        pageLimit: 100,
+        isGalleryImport: true,
+      ),
+    );
+    try {
+      final result = await scanner.scanDocument();
+      final pdf = result.pdf;
+      if (pdf == null || !mounted) return;
+      final t = DateTime.now();
+      String two(int v) => v.toString().padLeft(2, '0');
+      final name = 'Scan ${t.year}-${two(t.month)}-${two(t.day)} ${two(t.hour)}.${two(t.minute)}.pdf';
+      final src = pdf.uri.startsWith('file://') ? Uri.parse(pdf.uri).toFilePath() : pdf.uri;
+      final path = await FileService.importPath(src, name);
+      await RecentStore.instance.add(path, name);
+      if (!mounted) return;
+      toast(context, 'Scanned ${pdf.pageCount} page${pdf.pageCount == 1 ? '' : 's'}');
+      await Navigator.of(context).push(MaterialPageRoute(builder: (_) => ViewerPage(path: path, name: name)));
+    } catch (e) {
+      final msg = '$e';
+      if (!mounted || msg.toLowerCase().contains('cancel')) return;
+      toast(context, "Scanner unavailable: ${msg.replaceFirst('Exception: ', '')}. It needs Google Play services.");
+    } finally {
+      scanner.close();
+    }
+  }
+
   void _more() {
+    void go(Widget Function(String, String) page) => _pickThen(page);
+    final sections = <(String, List<_Tool>)>[
+      (
+        'Convert from PDF',
+        [
+          _Tool(Icons.description_outlined, 'PDF to Word', '', () => go((p, n) => PdfToWordPage(path: p, name: n))),
+          _Tool(Icons.table_chart_outlined, 'PDF to Excel', '', () => go((p, n) => PdfToExcelPage(path: p, name: n))),
+          _Tool(Icons.photo_library_outlined, 'PDF to JPG', '', () => go((p, n) => PdfToImagesPage(path: p, name: n))),
+          _Tool(Icons.text_snippet_outlined, 'Extract text', '', () => go((p, n) => ExtractTextPage(path: p, name: n))),
+        ]
+      ),
+      (
+        'Edit & sign',
+        [
+          _Tool(Icons.edit_document, 'Edit PDF', '', () => go((p, n) => PdfEditorPage(path: p, name: n))),
+          _Tool(Icons.draw_outlined, 'Sign PDF', '',
+              () => go((p, n) => PdfEditorPage(path: p, name: n, mode: EditorMode.sign))),
+          _Tool(Icons.format_color_fill, 'Redact PDF', '', () => go((p, n) => RedactPage(path: p, name: n))),
+          _Tool(Icons.document_scanner_outlined, 'OCR PDF', '', () => go((p, n) => OcrPage(path: p, name: n))),
+        ]
+      ),
+      (
+        'Optimize & secure',
+        [
+          _Tool(Icons.compress, 'Compress PDF', '', () => go((p, n) => CompressPage(path: p, name: n))),
+          _Tool(Icons.lock_outline, 'Protect PDF', '', () => go((p, n) => ProtectPage(path: p, name: n))),
+          _Tool(Icons.content_cut, 'Extract pages', '', () => _split(extract: true)),
+          _Tool(Icons.photo_size_select_large, 'Resize image', '', _resizeImages),
+        ]
+      ),
+    ];
     showModalBottomSheet<void>(
       context: context,
       showDragHandle: true,
+      isScrollControlled: true,
       builder: (sheet) {
-        Widget tile(IconData icon, String title, String subtitle, Widget Function(String, String) page) => ListTile(
-              leading: Icon(icon, color: Theme.of(sheet).colorScheme.primary),
-              title: Text(title),
-              subtitle: Text(subtitle),
-              onTap: () {
-                Navigator.pop(sheet);
-                _pickThen(page);
-              },
-            );
-        return SafeArea(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
+        final scheme = Theme.of(sheet).colorScheme;
+        return DraggableScrollableSheet(
+          expand: false,
+          initialChildSize: 0.72,
+          maxChildSize: 0.95,
+          builder: (_, scroll) => ListView(
+            controller: scroll,
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
             children: [
-              tile(Icons.lock_outline, 'Protect a PDF', 'Add a password (AES-256) and permissions',
-                  (path, name) => ProtectPage(path: path, name: name)),
-              tile(Icons.format_color_fill, 'Redact a PDF', 'Permanently black out text and areas',
-                  (path, name) => RedactPage(path: path, name: name)),
-              tile(Icons.compress, 'Compress a PDF', 'Make the file smaller by shrinking images',
-                  (path, name) => CompressPage(path: path, name: name)),
-              const SizedBox(height: 8),
+              Text('All tools', style: Theme.of(sheet).textTheme.titleLarge),
+              for (final (title, tools) in sections) ...[
+                Padding(
+                  padding: const EdgeInsets.only(top: 18, bottom: 8),
+                  child: Text(title.toUpperCase(),
+                      style: TextStyle(color: scheme.primary, fontWeight: FontWeight.w700, fontSize: 12, letterSpacing: 0.8)),
+                ),
+                GridView.count(
+                  crossAxisCount: 4,
+                  shrinkWrap: true,
+                  physics: const NeverScrollableScrollPhysics(),
+                  mainAxisSpacing: 8,
+                  crossAxisSpacing: 8,
+                  childAspectRatio: 0.82,
+                  children: [
+                    for (final t in tools)
+                      InkWell(
+                        borderRadius: BorderRadius.circular(14),
+                        onTap: () {
+                          Navigator.pop(sheet);
+                          t.onTap();
+                        },
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Container(
+                              width: 52,
+                              height: 52,
+                              decoration: BoxDecoration(
+                                color: scheme.primaryContainer,
+                                borderRadius: BorderRadius.circular(16),
+                              ),
+                              child: Icon(t.icon, color: scheme.onPrimaryContainer, size: 26),
+                            ),
+                            const SizedBox(height: 6),
+                            Text(t.title,
+                                textAlign: TextAlign.center,
+                                maxLines: 2,
+                                style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500)),
+                          ],
+                        ),
+                      ),
+                  ],
+                ),
+              ],
             ],
           ),
         );
@@ -138,17 +245,23 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
+  Future<void> _resizeImages() async {
+    final files = await FileService.pickImages();
+    if (files.isEmpty || !mounted) return;
+    await Navigator.of(context).push(MaterialPageRoute(builder: (_) => ResizeImagePage(files: files)));
+  }
+
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final recent = RecentStore.instance.items;
     final tools = <_Tool>[
+      _Tool(Icons.document_scanner, 'Scan', 'Camera to PDF, auto edges', _scan),
       _Tool(Icons.dashboard_customize_outlined, 'Organize pages', 'Reorder, rotate, delete, insert', _organize),
       _Tool(Icons.merge_type, 'Combine files', 'Merge PDFs and images', _combine),
       _Tool(Icons.call_split, 'Split PDF', 'Every N pages or by ranges', () => _split(extract: false)),
-      _Tool(Icons.content_cut, 'Extract pages', 'Copy chosen pages to a new PDF', () => _split(extract: true)),
       _Tool(Icons.image_outlined, 'Images to PDF', 'Photos and scans to one PDF', _images),
-      _Tool(Icons.more_horiz, 'More', 'Protect, redact, compress', _more),
+      _Tool(Icons.apps, 'More', 'Word, Excel, JPG, edit, sign, OCR…', _more),
     ];
 
     return Scaffold(
@@ -257,7 +370,8 @@ class _HomePageState extends State<HomePage> {
               itemBuilder: (context, i) {
                 final r = recent[i];
                 return ListTile(
-                  leading: const Icon(Icons.description_outlined),
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
+                  leading: _RecentThumb(key: ValueKey(r.path), path: r.path),
                   title: Text(r.name, maxLines: 1, overflow: TextOverflow.ellipsis),
                   subtitle: Text('${_size(r.path)}${_ago(r.openedAt)}'),
                   onTap: () => openPdfInViewer(context, r.path, name: r.name),
@@ -421,6 +535,46 @@ class _ToolCard extends StatelessWidget {
             ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// First-page preview for a Recent entry (cached PNG; lock icon for protected files).
+class _RecentThumb extends StatefulWidget {
+  const _RecentThumb({required this.path, super.key});
+  final String path;
+
+  @override
+  State<_RecentThumb> createState() => _RecentThumbState();
+}
+
+class _RecentThumbState extends State<_RecentThumb> {
+  late final Future<File?> _thumb = ThumbnailService.thumbnailFor(widget.path);
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      width: 44,
+      height: 58,
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(4),
+        border: Border.all(color: scheme.outlineVariant),
+        boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 2, offset: Offset(0, 1))],
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: FutureBuilder<File?>(
+        future: _thumb,
+        builder: (context, snap) {
+          if (snap.connectionState != ConnectionState.done) {
+            return const Center(child: SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 1.5)));
+          }
+          final f = snap.data;
+          if (f == null) return Icon(Icons.lock_outline, size: 20, color: scheme.outline);
+          return Image.file(f, fit: BoxFit.cover, alignment: Alignment.topCenter, gaplessPlayback: true);
+        },
       ),
     );
   }

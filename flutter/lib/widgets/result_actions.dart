@@ -8,11 +8,18 @@ import 'dialogs.dart';
 
 /// Share / Open / Save row for a finished PDF.
 class ResultActions extends StatelessWidget {
-  const ResultActions({required this.bytes, required this.fileName, this.allowOpen = true, super.key});
+  const ResultActions({
+    required this.bytes,
+    required this.fileName,
+    this.allowOpen = true,
+    this.mimeType = 'application/pdf',
+    super.key,
+  });
 
   final Uint8List bytes;
   final String fileName;
   final bool allowOpen;
+  final String mimeType;
 
   @override
   Widget build(BuildContext context) {
@@ -20,7 +27,7 @@ class ResultActions extends StatelessWidget {
       children: [
         Expanded(
           child: OutlinedButton.icon(
-            onPressed: () => FileService.shareBytes([(bytes, fileName)]),
+            onPressed: () => FileService.shareBytes([(bytes, fileName)], mimeType: mimeType),
             icon: const Icon(Icons.share),
             label: const Text('Share'),
           ),
@@ -42,7 +49,7 @@ class ResultActions extends StatelessWidget {
         Expanded(
           child: FilledButton.icon(
             onPressed: () async {
-              final ok = await FileService.saveAs(bytes, fileName);
+              final ok = await FileService.saveAs(bytes, fileName, mimeType: mimeType);
               if (ok && context.mounted) toast(context, 'Saved $fileName');
             },
             icon: const Icon(Icons.save_alt),

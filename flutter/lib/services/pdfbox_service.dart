@@ -75,6 +75,25 @@ class PdfBoxService {
     return _readAndDelete(out);
   }
 
+  /// Draws transparent PNG overlays onto pages (vector content stays untouched).
+  /// [stamps] maps 0-based page index -> PNG file path.
+  static Future<Uint8List> stamp({required String input, required Map<int, String> stamps, String? password}) async {
+    final out = await _tempOut('stamped');
+    try {
+      await _channel.invokeMethod<Map>('stamp', {
+        'input': input,
+        'output': out,
+        'password': password,
+        'stamps': [
+          for (final e in stamps.entries) {'page': e.key, 'path': e.value},
+        ],
+      });
+    } on PlatformException catch (e) {
+      throw Exception(_message(e));
+    }
+    return _readAndDelete(out);
+  }
+
   static Future<CompressResult> compress({
     required String input,
     required CompressLevel level,
