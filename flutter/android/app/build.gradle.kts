@@ -28,10 +28,8 @@ android {
         // flag during build.
         versionCode = flutter.versionCode
         versionName = flutter.versionName
-        // Phones only: OpenCV and ML Kit would otherwise add ~75 MB of x86_64 libraries.
-        ndk {
-            abiFilters += listOf("armeabi-v7a", "arm64-v8a")
-        }
+        // ABIs come from `--split-per-abi --target-platform android-arm,android-arm64`
+        // in CI: one APK per phone CPU, no x86_64 OpenCV/ML Kit libraries.
     }
 
     packaging {
