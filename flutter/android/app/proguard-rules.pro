@@ -6,3 +6,11 @@
 # Tesseract4Android: JNI calls back into these classes.
 -keep class com.googlecode.tesseract.android.** { *; }
 -keep class com.googlecode.leptonica.android.** { *; }
+# ML Kit document scanner + Play services: registrars and options are created by reflection.
+-keep class com.google.mlkit.** { *; }
+-keep class com.google.android.gms.internal.mlkit_** { *; }
+-keep class com.google.android.gms.common.internal.** { *; }
+-keep class * implements com.google.firebase.components.ComponentRegistrar { <init>(); *; }
+-keep class com.google_mlkit_document_scanner.** { *; }
+-keep class com.google_mlkit_commons.** { *; }
+-dontwarn com.google.mlkit.**

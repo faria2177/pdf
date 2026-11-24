@@ -121,14 +121,9 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _scan() async {
-    try {
-      final images = await ScanService.capture();
-      if (images.isEmpty || !mounted) return;
-      await Navigator.of(context).push(MaterialPageRoute(builder: (_) => ScanReviewPage(images: images)));
-    } catch (e) {
-      if (!mounted) return;
-      toast(context, "Scanner unavailable: ${'$e'.replaceFirst('Exception: ', '')}. It needs Google Play services.");
-    }
+    final images = await ScanService.captureOrPick(context);
+    if (images.isEmpty || !mounted) return;
+    await Navigator.of(context).push(MaterialPageRoute(builder: (_) => ScanReviewPage(images: images)));
   }
 
   Future<void> _idCard() async {

@@ -245,7 +245,7 @@ class _ScanReviewPageState extends State<ScanReviewPage> {
 
   Future<void> _addPages() async {
     try {
-      final more = await ScanService.capture();
+      final more = await ScanService.captureOrPick(context);
       if (more.isEmpty || !mounted) return;
       final start = _pages.length;
       setState(() => _pages.addAll(more.map((p) => ScanImage(p, filter: _defaultFilter))));
@@ -259,7 +259,7 @@ class _ScanReviewPageState extends State<ScanReviewPage> {
     final s = _current;
     if (s == null) return;
     try {
-      final shot = await ScanService.capture(pageLimit: 1);
+      final shot = await ScanService.captureOrPick(context, pageLimit: 1);
       if (shot.isEmpty || !mounted) return;
       ScanService.deleteQuietly([s.path]);
       s

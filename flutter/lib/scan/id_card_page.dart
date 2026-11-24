@@ -98,7 +98,7 @@ class _IdCardPageState extends State<IdCardPage> {
 
   Future<void> _capture(bool front) async {
     try {
-      final shot = await ScanService.capture(pageLimit: 1);
+      final shot = await ScanService.captureOrPick(context, pageLimit: 1);
       if (shot.isEmpty || !mounted) return;
       final old = front ? _front : _back;
       if (old != null) ScanService.deleteQuietly([old.path]);
