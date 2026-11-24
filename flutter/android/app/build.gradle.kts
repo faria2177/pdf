@@ -30,6 +30,13 @@ android {
         versionName = flutter.versionName
     }
 
+    // Android lint crashes inside camera_android_camerax (AnalyzerProxyApi.java,
+    // "bug in lint"); it only blocks release packaging, so skip the release lint gate.
+    lint {
+        checkReleaseBuilds = false
+        abortOnError = false
+    }
+
     buildTypes {
         release {
             // TODO: Add your own signing config for the release build.
