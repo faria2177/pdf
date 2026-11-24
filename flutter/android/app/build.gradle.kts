@@ -28,6 +28,17 @@ android {
         // flag during build.
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+        // Phones only: OpenCV and ML Kit would otherwise add ~75 MB of x86_64 libraries.
+        ndk {
+            abiFilters += listOf("armeabi-v7a", "arm64-v8a")
+        }
+    }
+
+    packaging {
+        resources {
+            // PdfBox's BouncyCastle post-quantum tables (~7 MB) are never used for PDF encryption.
+            excludes += "org/bouncycastle/pqc/**"
+        }
     }
 
     // Android lint crashes inside camera_android_camerax (AnalyzerProxyApi.java,
