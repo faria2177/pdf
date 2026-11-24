@@ -57,7 +57,8 @@ class _IdCardPageState extends State<IdCardPage> {
   double _customW = 85.6, _customH = 54;
   CardLayout _layout = CardLayout.stacked;
   CardPaper _paper = CardPaper.a4;
-  ScanFilter _filter = ScanFilter.enhance;
+  // The DocScanner camera already enhances card captures.
+  ScanFilter _filter = ScanFilter.original;
   bool _realSize = true;
   bool _rounded = true;
   bool _cutLines = true;
@@ -96,28 +97,39 @@ class _IdCardPageState extends State<IdCardPage> {
 
   // ------------------------------------------------------------------ capture
 
+  IdCardTemplate get _template => switch (_type) {
+        CardType.license => IdCardTemplate.driverLicense,
+        CardType.passport => IdCardTemplate.passport,
+        _ => IdCardTemplate.idCard,
+      };
+
+  /// DocScanner card camera: card frame guide, live four-corner detection,
+  /// Front then Back in one session when both sides are still missing.
   Future<void> _capture(bool front) async {
-    try {
-      final shot = await ScanService.captureOrPick(context, pageLimit: 1);
-      if (shot.isEmpty || !mounted) return;
-      final old = front ? _front : _back;
-      if (old != null) ScanService.deleteQuietly([old.path]);
-      setState(() {
-        final img = ScanImage(shot.first, filter: _filter);
-        if (front) {
-          _front = img;
-        } else {
-          _back = img;
+    final both = front && _twoSided && _back == null;
+    final shots = await ScanService.scanCard(
+      context,
+      template: _template,
+      sides: both ? 2 : 1,
+      side: front ? (_twoSided ? 'Front' : _template.firstSide) : 'Back',
+    );
+    if (shots.isEmpty || !mounted) return;
+    setState(() {
+      if (front) {
+        if (_front != null) ScanService.deleteQuietly([_front!.path]);
+        _front = ScanImage(shots[0], filter: _filter);
+        if (both && shots.length > 1) {
+          _back = ScanImage(shots[1], filter: _filter);
         }
-      });
-      _refresh();
-      // Scan the back right after the front, like CamScanner.
-      if (front && _twoSided && _back == null && mounted) {
-        final next = await confirm(context, 'Now scan the back side?', ok: 'Scan back', title: 'Front captured');
-        if (next && mounted) await _capture(false);
+      } else {
+        if (_back != null) ScanService.deleteQuietly([_back!.path]);
+        _back = ScanImage(shots[0], filter: _filter);
       }
-    } catch (e) {
-      if (mounted) toast(context, 'Scanner unavailable: $e');
+    });
+    _refresh();
+    if (front && both && shots.length == 1 && _back == null && mounted) {
+      final next = await confirm(context, 'Now scan the back side?', ok: 'Scan back', title: 'Front captured');
+      if (next && mounted) await _capture(false);
     }
   }
 

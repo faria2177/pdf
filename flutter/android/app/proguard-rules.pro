@@ -14,3 +14,19 @@
 -keep class com.google_mlkit_document_scanner.** { *; }
 -keep class com.google_mlkit_commons.** { *; }
 -dontwarn com.google.mlkit.**
+
+# DocScanner (doclens) scanner: rules from DS-Fult's tool/mlkit-proguard-rules.pro.
+-dontwarn com.google.mlkit.vision.text.chinese.**
+-dontwarn com.google.mlkit.vision.text.devanagari.**
+-dontwarn com.google.mlkit.vision.text.japanese.**
+-dontwarn com.google.mlkit.vision.text.korean.**
+-keepattributes Signature,*Annotation*,InnerClasses,EnclosingMethod
+-keep class com.google.android.gms.internal.mlkit_vision_text_common.** { *; }
+-keep class com.google.android.gms.internal.mlkit_vision_text_bundled_common.** { *; }
+-keep class com.google.android.gms.internal.mlkit_vision_common.** { *; }
+-keep class com.google.android.gms.internal.mlkit_common.** { *; }
+-keep class com.google.firebase.components.** { *; }
+# Name-based JNI exports (Java_dev_doclens_*) need the original class/method names.
+-keep class dev.doclens.doclens.** { *; }
+-keep class org.opencv.** { *; }
+-dontwarn org.opencv.**

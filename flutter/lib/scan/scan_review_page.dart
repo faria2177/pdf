@@ -50,8 +50,11 @@ class _Cached {
 
 /// CamScanner-style review screen after capturing pages.
 class ScanReviewPage extends StatefulWidget {
-  const ScanReviewPage({required this.images, super.key});
+  const ScanReviewPage({required this.images, this.initialFilter, super.key});
   final List<String> images;
+
+  /// Overrides the remembered filter (pages from DocScanner are already enhanced).
+  final ScanFilter? initialFilter;
 
   @override
   State<ScanReviewPage> createState() => _ScanReviewPageState();
@@ -92,6 +95,7 @@ class _ScanReviewPageState extends State<ScanReviewPage> {
       (f) => f.name == prefs.getString('scan_filter'),
       orElse: () => ScanFilter.magic,
     );
+    if (widget.initialFilter != null) _defaultFilter = widget.initialFilter!;
     _paper = PaperSize.values.firstWhere((p) => p.name == prefs.getString('scan_paper'), orElse: () => PaperSize.a4);
     _quality =
         ScanQuality.values.firstWhere((q) => q.name == prefs.getString('scan_quality'), orElse: () => ScanQuality.balanced);
@@ -248,7 +252,7 @@ class _ScanReviewPageState extends State<ScanReviewPage> {
       final more = await ScanService.captureOrPick(context);
       if (more.isEmpty || !mounted) return;
       final start = _pages.length;
-      setState(() => _pages.addAll(more.map((p) => ScanImage(p, filter: _defaultFilter))));
+      setState(() => _pages.addAll(more.map((p) => ScanImage(p, filter: widget.initialFilter ?? _defaultFilter))));
       _pageCtrl.jumpToPage(start);
     } catch (e) {
       if (mounted) toast(context, 'Scanner unavailable: $e');

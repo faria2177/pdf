@@ -4,11 +4,13 @@ import 'package:pdfrx/pdfrx.dart';
 import 'pages/home_page.dart';
 import 'services/intent_service.dart';
 import 'services/recent_store.dart';
+import 'services/theme_controller.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await pdfrxFlutterInitialize();
   await RecentStore.instance.load();
+  await ThemeController.instance.load();
   runApp(const PdfStudioApp());
 }
 
@@ -35,11 +37,13 @@ class _PdfStudioAppState extends State<PdfStudioApp> {
   @override
   Widget build(BuildContext context) {
     const seed = Color(0xFFB70228);
-    return MaterialApp(
+    return ValueListenableBuilder<ThemeMode>(
+      valueListenable: ThemeController.instance,
+      builder: (context, mode, _) => MaterialApp(
       title: 'PDF Studio',
       navigatorKey: navigatorKey,
       debugShowCheckedModeBanner: false,
-      themeMode: ThemeMode.system,
+      themeMode: mode,
       theme: ThemeData(
         useMaterial3: true,
         colorScheme: ColorScheme.fromSeed(seedColor: seed),
@@ -52,9 +56,16 @@ class _PdfStudioAppState extends State<PdfStudioApp> {
       // above the system navigation bar (and clear of side cut-outs in landscape).
       builder: (context, child) => ColoredBox(
         color: Theme.of(context).colorScheme.surfaceContainer,
-        child: SafeArea(top: false, child: child ?? const SizedBox.shrink()),
+        child: SafeArea(
+          top: false,
+          // The DocScanner camera (doclens) still uses package:flutter/material;
+          // the bridge gives it this app's theme and localizations.
+          // ignore: deprecated_member_use
+          child: MaterialUiCompatibilityBridge(child: child ?? const SizedBox.shrink()),
+        ),
       ),
       home: const HomePage(),
+    ),
     );
   }
 }

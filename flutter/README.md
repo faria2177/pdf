@@ -58,3 +58,10 @@ android/app/src/main/       manifest (intent filters), MainActivity.kt (intent c
                             PdfBoxChannel.kt (protect/compress via PdfBox-Android)
 android/app/build.gradle.kts adds the pdfbox-android dependency
 ```
+
+## Scanner
+
+Scan and ID Card use the DocScanner (DS-Fult, github.com/faria2177/DS-Fult) camera:
+`third_party/doclens` (local fork of MIT-licensed doclens with DS-Fult's own C++ boundary
+engine, OpenCV and the DocNet model) plus the screens/services in `lib/ds/`. The online
+auto-crop option is removed in this build; all detection runs on the device.

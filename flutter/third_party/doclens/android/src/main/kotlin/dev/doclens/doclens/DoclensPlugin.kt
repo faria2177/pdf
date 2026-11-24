@@ -1,0 +1,794 @@
+package dev.doclens.doclens
+
+import android.Manifest
+import android.content.ContentValues
+import android.app.Activity
+import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.content.pm.ShortcutInfo
+import android.content.pm.ShortcutManager
+import android.graphics.drawable.Icon
+import android.graphics.ImageFormat
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraManager
+import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
+import android.os.Handler
+import android.os.Looper
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
+import io.flutter.embedding.engine.plugins.FlutterPlugin
+import io.flutter.embedding.engine.plugins.activity.ActivityAware
+import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
+import io.flutter.plugin.common.EventChannel
+import io.flutter.plugin.common.MethodCall
+import io.flutter.plugin.common.MethodChannel
+import io.flutter.plugin.common.PluginRegistry
+import io.flutter.view.TextureRegistry
+import java.io.File
+import java.util.concurrent.Executors
+
+private const val CAMERA_PERMISSION_REQUEST = 0x4F4E
+private const val PDF_PICK_REQUEST = 0x5044
+private const val KEY_FILE_PICK_REQUEST = 0x4B46
+private const val MAX_KEY_FILE_BYTES = 64 * 1024
+private const val PDF_SAVE_REQUEST = 0x5045
+private const val MAX_PDF_IMPORT_BYTES = 80L * 1024 * 1024
+
+class DoclensPlugin :
+    FlutterPlugin,
+    ActivityAware,
+    MethodChannel.MethodCallHandler,
+    PluginRegistry.ActivityResultListener,
+    PluginRegistry.RequestPermissionsResultListener,
+    PluginRegistry.NewIntentListener {
+
+    private lateinit var methodChannel: MethodChannel
+    private lateinit var eventChannel: EventChannel
+    private lateinit var levelChannel: EventChannel
+    private lateinit var textureRegistry: TextureRegistry
+    private lateinit var context: Context
+
+    private val eventStream = QuadEventStream()
+    private var activity: Activity? = null
+    private var activityBinding: ActivityPluginBinding? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val backgroundExecutor = Executors.newSingleThreadExecutor()
+    // At most two still-image tasks in parallel; avoid queuing gallery
+    // detection behind unrelated OCR/PDF calls.
+    private val stillImageExecutor = Executors.newFixedThreadPool(2)
+
+    private var session: ScannerSession? = null
+    /** Bundled U²-Net model file for the live whole-object assist. */
+    private var liveSalientModelPath: String? = null
+    private var pendingPermissionInit: (() -> Unit)? = null
+    private var nativeUIScanner: NativeUIScanner? = null
+    private var levelStream: DeviceLevelStream? = null
+    private var pendingPdfPick: MethodChannel.Result? = null
+    private var pendingKeyFilePick: MethodChannel.Result? = null
+    private var pendingPdfSave: Pair<MethodChannel.Result, String>? = null
+
+    override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
+        context = binding.applicationContext
+        textureRegistry = binding.textureRegistry
+        methodChannel = MethodChannel(binding.binaryMessenger, "doclens/methods")
+        methodChannel.setMethodCallHandler(this)
+        eventChannel = EventChannel(binding.binaryMessenger, "doclens/events")
+        eventChannel.setStreamHandler(eventStream)
+        levelStream = DeviceLevelStream(context)
+        levelChannel = EventChannel(binding.binaryMessenger, "doclens/level")
+        levelChannel.setStreamHandler(levelStream)
+    }
+
+    override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
+        methodChannel.setMethodCallHandler(null)
+        eventChannel.setStreamHandler(null)
+        levelChannel.setStreamHandler(null)
+        levelStream?.dispose()
+        levelStream = null
+        session?.dispose()
+        session = null
+        backgroundExecutor.shutdown()
+        stillImageExecutor.shutdown()
+    }
+
+    override fun onAttachedToActivity(binding: ActivityPluginBinding) {
+        activity = binding.activity
+        activityBinding = binding
+        binding.addRequestPermissionsResultListener(this)
+        binding.addActivityResultListener(this)
+        binding.addOnNewIntentListener(this)
+        val ui = NativeUIScanner(context).also { nativeUIScanner = it }
+        binding.addActivityResultListener(ui)
+    }
+
+    override fun onReattachedToActivityForConfigChanges(binding: ActivityPluginBinding) =
+        onAttachedToActivity(binding)
+
+    override fun onDetachedFromActivity() {
+        activityBinding?.removeRequestPermissionsResultListener(this)
+        activityBinding?.removeActivityResultListener(this)
+        activityBinding?.removeOnNewIntentListener(this)
+        nativeUIScanner?.let { activityBinding?.removeActivityResultListener(it) }
+        nativeUIScanner = null
+        activity = null
+        activityBinding = null
+    }
+
+    override fun onDetachedFromActivityForConfigChanges() = onDetachedFromActivity()
+
+    override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
+        when (call.method) {
+            "initialize" -> initialize(call, result)
+            "appVersion" -> result.success(try {
+                AppUpdateInstaller.version(context)
+            } catch (_: Throwable) { null })
+            "canInstallUpdates" -> result.success(AppUpdateInstaller.canInstall(context))
+            "openInstallPermission" -> {
+                try {
+                    AppUpdateInstaller.openInstallPermission(activity, context)
+                    result.success(true)
+                } catch (_: Throwable) { result.success(false) }
+            }
+            "installUpdate" -> {
+                val path = call.argument<String>("path")
+                result.success(try {
+                    path != null && AppUpdateInstaller.install(activity, context, path)
+                } catch (_: Throwable) { false })
+            }
+            "dispose" -> { session?.dispose(); session = null; result.success(null) }
+            "capture" -> {
+                val s = session
+                if (s == null) { result.error("init_failed", "Not initialized", null); return }
+                // Optional normalized Flutter overlay, frozen exactly at the
+                // shutter. Legacy callers and iOS do not need this argument.
+                val displayed = call.argument<Map<String, Any?>>("displayedQuad")
+                    ?.let { Quad.fromMap(it) }
+                s.capture(result, displayed)
+            }
+            "warpImage" -> handleWarp(call, result)
+            "rotateImage" -> handleRotate(call, result)
+            "recognizeText" -> handleRecognizeText(call, result)
+            "removeSubjectBackground" -> handleRemoveSubjectBackground(call, result)
+            "setFlashMode" -> { session?.setFlashMode(call.argument<String>("mode") ?: "auto"); result.success(null) }
+            "switchCamera" -> { session?.switchCamera(); result.success(null) }
+            "pause" -> { session?.pause(); result.success(null) }
+            "resume" -> { session?.resume(); result.success(null) }
+            "focusAt" -> {
+                val x = (call.argument<Number>("x") ?: 0.5).toFloat()
+                val y = (call.argument<Number>("y") ?: 0.5).toFloat()
+                session?.focus(x, y)
+                result.success(null)
+            }
+            "getCaptureResolutions" -> {
+                try {
+                    val manager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+                    val cameraId = manager.cameraIdList.firstOrNull { id ->
+                        manager.getCameraCharacteristics(id).get(CameraCharacteristics.LENS_FACING) ==
+                            CameraCharacteristics.LENS_FACING_BACK
+                    }
+                    val sizes = if (cameraId == null) emptyList() else {
+                        val map = manager.getCameraCharacteristics(cameraId)
+                            .get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+                        map?.getOutputSizes(ImageFormat.JPEG)?.toList() ?: emptyList()
+                    }
+                    // The scanner retains JPEG pixels up to 4096 px on the long
+                    // side. Do not offer high-megapixel modes we would downscale.
+                    val supported = sizes.filter { size ->
+                        size.width >= 1600 && size.height >= 1000 &&
+                            size.width <= 4096 && size.height <= 4096 &&
+                            size.width.toLong() * size.height <= 13000000
+                    }.distinctBy { size -> size.width to size.height }
+                        .sortedByDescending { size -> size.width.toLong() * size.height }
+                        .map { size -> listOf(size.width, size.height) }
+                    result.success(supported)
+                } catch (_: Exception) {
+                    result.success(emptyList<List<Int>>())
+                }
+            }
+            "saveImageToGallery" -> {
+                val imagePath = call.argument<String>("imagePath")
+                if (imagePath == null) {
+                    result.error("invalid_image", "Missing image path", null)
+                } else {
+                    backgroundExecutor.execute {
+                        val saved = saveImageToGallery(imagePath)
+                        mainHandler.post { result.success(saved) }
+                    }
+                }
+            }
+            "pickPdfFile" -> pickPdfFile(result)
+            "pickTextFile" -> pickTextFile(result)
+            "savePdfFile" -> savePdfFile(call, result)
+            "pinDocumentShortcut" -> {
+                val id = call.argument<String>("documentId")
+                val title = call.argument<String>("title")
+                if (id.isNullOrBlank() || title.isNullOrBlank()) {
+                    result.error("invalid_document", "Missing document shortcut data", null)
+                } else {
+                    result.success(pinDocumentShortcut(id, title))
+                }
+            }
+            "consumeLaunchDocumentShortcut" -> {
+                val intent = activity?.intent
+                val id = intent?.getStringExtra("docscanner_document_id")
+                intent?.removeExtra("docscanner_document_id")
+                result.success(id)
+            }
+            "scanWithNativeUI" -> handleNativeUIScan(call, result)
+            "detectInImage" -> handleDetectInImage(call, result)
+            "salientMask" -> handleSalientMask(call, result)
+            "setLiveSalientModel" -> {
+                liveSalientModelPath = call.argument<String>("modelPath")
+                    ?.takeIf { java.io.File(it).isFile }
+                session?.salientAssist?.modelPath = liveSalientModelPath
+                result.success(liveSalientModelPath != null)
+            }
+            "getNativeLibraryStatus" -> result.success(NativeLibraryDiagnostics.status(context))
+            "nativeMagicEnhance" -> {
+                val bytes = call.argument<ByteArray>("imageBytes")
+                val png = call.argument<Boolean>("png") == true
+                val onlyNeutral = call.argument<Boolean>("onlyNeutral") != false
+                if (bytes == null || bytes.isEmpty()) { result.success(null); return }
+                stillImageExecutor.execute {
+                    val out = NativeScannerCore.magicEnhance(bytes, png, onlyNeutral)
+                    mainHandler.post { result.success(out) }
+                }
+            }
+            "readCodesInFile" -> {
+                val path = call.argument<String>("imagePath")
+                if (path == null) { result.success(emptyList<Any>()); return }
+                stillImageExecutor.execute {
+                    val out = try { QrReader.readFile(path) } catch (_: Throwable) { emptyList() }
+                    mainHandler.post { result.success(out) }
+                }
+            }
+            "stitchLongImage" -> {
+                val paths = call.argument<List<String>>("paths")
+                val watermark = call.argument<Boolean>("watermark") == true
+                val smart = call.argument<Boolean>("smart") != false
+                if (paths.isNullOrEmpty()) { result.success(null); return }
+                stillImageExecutor.execute {
+                    try {
+                        val out = LongImageStitcher.stitch(paths, watermark, smart)
+                        mainHandler.post { result.success(out) }
+                    } catch (e: IllegalStateException) {
+                        mainHandler.post { result.error("too_long", e.message, null) }
+                    } catch (_: Throwable) {
+                        mainHandler.post { result.success(null) }
+                    }
+                }
+            }
+            "pdfBilevelPage" -> {
+                val path = call.argument<String>("imagePath")
+                val minShare = call.argument<Double>("minShare") ?: .95
+                val maxColour = call.argument<Double>("maxColour") ?: .002
+                if (path == null) { result.success(null); return }
+                stillImageExecutor.execute {
+                    val out = NativePdfCodec.bilevelPage(path, minShare, maxColour)
+                    mainHandler.post { result.success(out) }
+                }
+            }
+            "nativeCompactJpeg" -> {
+                val path = call.argument<String>("imagePath")
+                val maxSide = call.argument<Int>("maxSide") ?: 1700
+                val quality = call.argument<Int>("quality") ?: 80
+                if (path == null) { result.success(null); return }
+                stillImageExecutor.execute {
+                    val out = NativePdfCodec.compactJpeg(path, maxSide, quality)
+                    mainHandler.post { result.success(out) }
+                }
+            }
+            "nativePaperRegion" -> {
+                val path = call.argument<String>("imagePath")
+                if (path == null) { result.success(null); return }
+                stillImageExecutor.execute {
+                    val out = NativeScannerCore.paperRegion(path)
+                    mainHandler.post { result.success(out) }
+                }
+            }
+            else -> result.notImplemented()
+        }
+    }
+
+    override fun onNewIntent(intent: Intent): Boolean {
+        val documentId = intent.getStringExtra("docscanner_document_id") ?: return false
+        activity?.intent = intent
+        intent.removeExtra("docscanner_document_id")
+        methodChannel.invokeMethod("openPinnedDocument", documentId)
+        return true
+    }
+
+    /**
+     * Lets the user choose a small text file (API key list) and returns its
+     * text. The content is read straight into memory and never copied to
+     * app storage, because it holds secrets.
+     */
+    private fun pickTextFile(result: MethodChannel.Result) {
+        val foreground = activity
+        if (foreground == null) {
+            result.error("no_activity", "The file picker needs an active screen", null)
+            return
+        }
+        if (pendingKeyFilePick != null) {
+            result.error("picker_busy", "A file picker is already open", null)
+            return
+        }
+        pendingKeyFilePick = result
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            // .env and .key files often have no registered MIME type.
+            type = "*/*"
+            putExtra(Intent.EXTRA_MIME_TYPES, arrayOf(
+                "text/*", "application/json", "application/octet-stream"))
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        try {
+            foreground.startActivityForResult(intent, KEY_FILE_PICK_REQUEST)
+        } catch (error: Exception) {
+            pendingKeyFilePick = null
+            result.error("picker_unavailable", error.message, null)
+        }
+    }
+
+    private fun pickPdfFile(result: MethodChannel.Result) {
+        val foreground = activity
+        if (foreground == null) {
+            result.error("no_activity", "The PDF picker needs an active screen", null)
+            return
+        }
+        if (pendingPdfPick != null) {
+            result.error("picker_busy", "A PDF picker is already open", null)
+            return
+        }
+        pendingPdfPick = result
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "application/pdf"
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        try {
+            foreground.startActivityForResult(intent, PDF_PICK_REQUEST)
+        } catch (error: Exception) {
+            pendingPdfPick = null
+            result.error("picker_unavailable", error.message, null)
+        }
+    }
+
+    /** Writes only a generated, app-cache PDF to a user-chosen SAF document. */
+    private fun savePdfFile(call: MethodCall, result: MethodChannel.Result) {
+        val foreground = activity
+        if (foreground == null) {
+            result.error("no_activity", "The PDF save dialog needs an active screen", null)
+            return
+        }
+        if (pendingPdfSave != null) {
+            result.error("save_busy", "A PDF save dialog is already open", null)
+            return
+        }
+        val source = call.argument<String>("sourcePath")?.let { File(it) }
+        val safe = try {
+            val cacheRoot = context.cacheDir.canonicalPath + File.separator
+            source != null && source.isFile &&
+                source.name.endsWith(".pdf", ignoreCase = true) &&
+                source.canonicalPath.startsWith(cacheRoot)
+        } catch (_: Exception) { false }
+        if (!safe || source == null) {
+            result.error("invalid_pdf", "Expected a generated PDF inside app cache", null)
+            return
+        }
+        val requested = call.argument<String>("fileName") ?: "DocScanner.pdf"
+        val basename = requested.replace(Regex("[\\\\/\\r\\n]"), "_")
+            .trim().take(100).ifBlank { "DocScanner.pdf" }
+        val filename = if (basename.endsWith(".pdf", ignoreCase = true)) basename
+            else "$basename.pdf"
+        pendingPdfSave = result to source.absolutePath
+        val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "application/pdf"
+            putExtra(Intent.EXTRA_TITLE, filename)
+            addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+        }
+        try {
+            foreground.startActivityForResult(intent, PDF_SAVE_REQUEST)
+        } catch (error: Exception) {
+            pendingPdfSave = null
+            result.error("save_unavailable", error.message, null)
+        }
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?): Boolean {
+        if (requestCode == PDF_SAVE_REQUEST) {
+            val pending = pendingPdfSave ?: return true
+            pendingPdfSave = null
+            val uri = if (resultCode == Activity.RESULT_OK) data?.data else null
+            if (uri == null) {
+                pending.first.success(false)
+                return true
+            }
+            backgroundExecutor.execute {
+                try {
+                    val output = context.contentResolver.openOutputStream(uri, "wt")
+                        ?: throw IllegalStateException("Selected destination cannot be written")
+                    File(pending.second).inputStream().use { input ->
+                        output.use { input.copyTo(it) }
+                    }
+                    mainHandler.post { pending.first.success(true) }
+                } catch (error: Exception) {
+                    mainHandler.post {
+                        pending.first.error("pdf_save_failed", error.message, null)
+                    }
+                }
+            }
+            return true
+        }
+        if (requestCode == KEY_FILE_PICK_REQUEST) {
+            val callback = pendingKeyFilePick ?: return true
+            pendingKeyFilePick = null
+            val uri = if (resultCode == Activity.RESULT_OK) data?.data else null
+            if (uri == null) {
+                callback.success(null)
+                return true
+            }
+            backgroundExecutor.execute {
+                try {
+                    val stream = context.contentResolver.openInputStream(uri)
+                        ?: throw IllegalArgumentException("The file cannot be read")
+                    val bytes = stream.use { input ->
+                        val buffer = java.io.ByteArrayOutputStream()
+                        val chunk = ByteArray(4096)
+                        while (true) {
+                            val n = input.read(chunk)
+                            if (n < 0) break
+                            buffer.write(chunk, 0, n)
+                            if (buffer.size() > MAX_KEY_FILE_BYTES) {
+                                throw IllegalArgumentException(
+                                    "This file is too large for an API key list")
+                            }
+                        }
+                        buffer.toByteArray()
+                    }
+                    val text = String(bytes, Charsets.UTF_8)
+                    mainHandler.post { callback.success(text) }
+                } catch (error: Exception) {
+                    mainHandler.post {
+                        callback.error("key_file_unreadable", error.message, null)
+                    }
+                }
+            }
+            return true
+        }
+        if (requestCode != PDF_PICK_REQUEST) return false
+        val callback = pendingPdfPick ?: return true
+        pendingPdfPick = null
+        val uri = if (resultCode == Activity.RESULT_OK) data?.data else null
+        if (uri == null) {
+            callback.success(null)
+            return true
+        }
+        backgroundExecutor.execute {
+            val destination = File(context.cacheDir,
+                "docscanner_pdf_${System.nanoTime()}.pdf")
+            try {
+                val stream = context.contentResolver.openInputStream(uri)
+                    ?: throw IllegalArgumentException("Selected PDF cannot be read")
+                stream.use { input ->
+                    destination.outputStream().use { output ->
+                        val buffer = ByteArray(8192)
+                        var copied = 0L
+                        while (true) {
+                            val n = input.read(buffer)
+                            if (n < 0) break
+                            copied += n
+                            if (copied > MAX_PDF_IMPORT_BYTES) {
+                                throw IllegalArgumentException("PDF is larger than 80 MB")
+                            }
+                            output.write(buffer, 0, n)
+                        }
+                    }
+                }
+                if (destination.length() == 0L) {
+                    throw IllegalArgumentException("Selected PDF is empty")
+                }
+                mainHandler.post { callback.success(destination.absolutePath) }
+            } catch (error: Exception) {
+                destination.delete()
+                mainHandler.post { callback.error("pdf_import_failed", error.message, null) }
+            }
+        }
+        return true
+    }
+
+    private fun pinDocumentShortcut(documentId: String, title: String): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return false
+        val shortcuts = context.getSystemService(ShortcutManager::class.java)
+            ?: return false
+        if (!shortcuts.isRequestPinShortcutSupported) return false
+        val launch = context.packageManager.getLaunchIntentForPackage(context.packageName)
+            ?: return false
+        launch.action = "dev.doclens.docscanner.OPEN_DOCUMENT"
+        launch.flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or
+            Intent.FLAG_ACTIVITY_SINGLE_TOP
+        launch.putExtra("docscanner_document_id", documentId)
+        val shortcut = ShortcutInfo.Builder(context, "docscanner_$documentId")
+            .setShortLabel(title.take(30))
+            .setLongLabel(title.take(90))
+            .setIcon(Icon.createWithResource(context, android.R.drawable.ic_menu_gallery))
+            .setIntent(launch)
+            .build()
+        return shortcuts.requestPinShortcut(shortcut, null)
+    }
+
+    private fun handleNativeUIScan(call: MethodCall, result: MethodChannel.Result) {
+        val activity = this.activity
+        val ui = nativeUIScanner
+        if (activity == null || ui == null) {
+            result.error("init_failed", "No activity attached", null); return
+        }
+        ui.launch(
+            activity = activity,
+            pageLimit = (call.argument<Int>("pageLimit") ?: 100),
+            allowGalleryImport = call.argument<Boolean>("allowGalleryImport") ?: false,
+            jpegQuality = call.argument<Int>("jpegQuality") ?: 100,
+            result = result,
+        )
+    }
+
+    private fun saveImageToGallery(path: String): Boolean {
+        // Scoped-storage insertion avoids requesting broad media permissions.
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return false
+        val source = File(path)
+        if (!source.isFile) return false
+        val extension = when (source.extension.lowercase()) {
+            "png" -> "png"
+            "webp" -> "webp"
+            else -> "jpg"
+        }
+        val mimeType = when (extension) {
+            "png" -> "image/png"
+            "webp" -> "image/webp"
+            else -> "image/jpeg"
+        }
+        val resolver = context.contentResolver
+        val values = ContentValues().apply {
+            put(MediaStore.Images.Media.DISPLAY_NAME,
+                "DocScanner_${System.currentTimeMillis()}_${source.nameWithoutExtension}.$extension")
+            put(MediaStore.Images.Media.MIME_TYPE, mimeType)
+            put(MediaStore.Images.Media.RELATIVE_PATH,
+                Environment.DIRECTORY_PICTURES + "/DocScanner")
+            put(MediaStore.Images.Media.IS_PENDING, 1)
+        }
+        val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+            ?: return false
+        return try {
+            resolver.openOutputStream(uri)?.use { stream ->
+                source.inputStream().use { input -> input.copyTo(stream) }
+            } ?: throw IllegalStateException("Cannot open gallery output")
+            values.clear()
+            values.put(MediaStore.Images.Media.IS_PENDING, 0)
+            resolver.update(uri, values, null, null)
+            true
+        } catch (_: Exception) {
+            resolver.delete(uri, null, null)
+            false
+        }
+    }
+
+    private fun handleWarp(call: MethodCall, result: MethodChannel.Result) {
+        val rawPath = call.argument<String>("rawImagePath")
+        val quadMap = call.argument<Map<String, Any?>>("quad")
+        val quality = call.argument<Int>("jpegQuality") ?: 100
+        val enhancement = call.argument<String>("enhancement") ?: "none"
+        val autoOrientation = call.argument<String>("autoOrientation") ?: "none"
+        val trimShadow = call.argument<Boolean>("trimShadow") ?: false
+        if (rawPath == null || quadMap == null) {
+            result.error("capture_failed", "Invalid warp args", null); return
+        }
+        stillImageExecutor.execute {
+            try {
+                val q = Quad.fromMap(quadMap)
+                val out = ImageWarper.warpFile(rawPath, q, quality, enhancement,
+                    autoOrientation, trimShadow)
+                mainHandler.post { result.success(out) }
+            } catch (e: Exception) {
+                mainHandler.post { result.error("capture_failed", e.message, null) }
+            }
+        }
+    }
+
+    /** Open-source U²-Net foreground map for an imported still. Any failure
+     * (model, decode, native library) answers null so Flutter simply uses
+     * its existing detectors. */
+    private fun handleSalientMask(call: MethodCall, result: MethodChannel.Result) {
+        val imagePath = call.argument<String>("imagePath")
+        val modelPath = call.argument<String>("modelPath")
+        if (imagePath == null || modelPath == null) {
+            result.success(null); return
+        }
+        stillImageExecutor.execute {
+            val out = try {
+                SalientMaskEngine.run(modelPath, imagePath,
+                    if (call.argument<Boolean>("docNet") == false) null else context.assets)
+            } catch (_: Throwable) {
+                null
+            }
+            mainHandler.post { result.success(out) }
+        }
+    }
+
+    private fun handleDetectInImage(call: MethodCall, result: MethodChannel.Result) {
+        val path = call.argument<String>("imagePath")
+        if (path == null) {
+            result.error("capture_failed", "Invalid detectInImage args", null); return
+        }
+        // Detection polarity travels with the call rather than the session:
+        // `detectInImage` is a pure file operation and works with no camera
+        // session bound. Absent args fall back to the paper-bright default.
+        val polarity = DetectionPolarity.from(call.argument<String>("detectionPolarity"))
+        val thresholdOffset = call.argument<Int>("detectionThresholdOffset")
+            ?: QuadDetector.DEFAULT_THRESHOLD_OFFSET
+        val preferIdCardBounds = call.argument<Boolean>("preferIdCardBounds") ?: false
+        stillImageExecutor.execute {
+            try {
+                val out = QuadDetector.detectInFile(path, polarity, thresholdOffset,
+                    preferIdCardBounds)
+                mainHandler.post { result.success(out) }
+            } catch (e: Exception) {
+                mainHandler.post { result.error("capture_failed", e.message, null) }
+            }
+        }
+    }
+
+    /** ML Kit runs locally; first use may require Google Play services to
+     * obtain its subject model. No photo data is sent to an AI cloud API.
+     * Fail explicitly so Flutter can offer manual color removal instead of
+     * silently producing a bad transparent image. */
+    private fun handleRemoveSubjectBackground(
+        call: MethodCall, result: MethodChannel.Result,
+    ) {
+        val bytes = call.argument<ByteArray>("imageBytes")
+        // ARGB colours such as 0xFFFFFFFF may arrive as a 64-bit Long
+        // through Flutter's codec. Normalize any Number to 32-bit pixels.
+        val background = call.argument<Number>("backgroundArgb")?.toInt()
+        if (bytes == null || bytes.isEmpty()) {
+            result.error("invalid_image", "Missing image for BG Remover", null)
+            return
+        }
+        stillImageExecutor.execute {
+            try {
+                val png = SubjectBackgroundRemover.process(bytes, background)
+                mainHandler.post { result.success(png) }
+            } catch (e: Exception) {
+                val detail = e.cause?.message ?: e.message ?: "Unknown error"
+                mainHandler.post {
+                    result.error("ai_model_unavailable",
+                        "AI background removal failed. Google Play services " +
+                        "may need to download its subject model; connect to " +
+                        "the internet once and retry. $detail", null)
+                }
+            }
+        }
+    }
+
+    private fun handleRecognizeText(call: MethodCall, result: MethodChannel.Result) {
+        val path = call.argument<String>("imagePath")
+        if (path == null) {
+            result.error("capture_failed", "Invalid recognizeText args", null); return
+        }
+        backgroundExecutor.execute {
+            try {
+                val out = TextRecognizer.recognize(path)
+                mainHandler.post { result.success(out) }
+            } catch (e: Exception) {
+                mainHandler.post { result.error("capture_failed", e.message, null) }
+            }
+        }
+    }
+
+    private fun handleRotate(call: MethodCall, result: MethodChannel.Result) {
+        val path = call.argument<String>("imagePath")
+        val quarterTurns = call.argument<Int>("quarterTurns") ?: 0
+        val quality = call.argument<Int>("jpegQuality") ?: 100
+        if (path == null) {
+            result.error("capture_failed", "Invalid rotate args", null); return
+        }
+        backgroundExecutor.execute {
+            try {
+                val out = ImageWarper.rotateFile(path, quarterTurns, quality)
+                mainHandler.post { result.success(out) }
+            } catch (e: Exception) {
+                mainHandler.post { result.error("capture_failed", e.message, null) }
+            }
+        }
+    }
+
+    private fun initialize(call: MethodCall, result: MethodChannel.Result) {
+        val activity = this.activity
+        if (activity == null) {
+            result.error("init_failed", "No activity attached", null); return
+        }
+        // Tear down any previous session — never leak a running camera.
+        session?.dispose()
+        session = null
+
+        val granted = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
+            PackageManager.PERMISSION_GRANTED
+        if (!granted) {
+            pendingPermissionInit = { doInitialize(call, result) }
+            ActivityCompat.requestPermissions(
+                activity,
+                arrayOf(Manifest.permission.CAMERA),
+                CAMERA_PERMISSION_REQUEST,
+            )
+            return
+        }
+        doInitialize(call, result)
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun doInitialize(call: MethodCall, result: MethodChannel.Result) {
+        val activity = this.activity ?: run {
+            result.error("init_failed", "No activity attached", null); return
+        }
+        val cfg = ScannerConfig.fromMap(call.arguments as? Map<String, Any?> ?: emptyMap())
+        val entry = textureRegistry.createSurfaceTexture()
+        val s = ScannerSession(
+            activity = activity,
+            context = context,
+            config = cfg,
+            textureEntry = entry,
+            eventSink = { eventStream.send(it) },
+        )
+        session = s
+        s.salientAssist.modelPath = liveSalientModelPath
+        s.salientAssist.assets = context.assets
+        s.start { startResult ->
+            startResult.fold(
+                onSuccess = { result.success(it) },
+                onFailure = { err ->
+                    val code = when (err) {
+                        is ScannerException.PermissionDenied -> "permission_denied"
+                        is ScannerException.Unavailable -> "unavailable"
+                        else -> "init_failed"
+                    }
+                    entry.release()
+                    session = null
+                    result.error(code, err.message, null)
+                },
+            )
+        }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ): Boolean {
+        if (requestCode != CAMERA_PERMISSION_REQUEST) return false
+        val pending = pendingPermissionInit ?: return true
+        pendingPermissionInit = null
+        // Either way, invoke the pending init: on grant it will start the
+        // session normally; on denial `ScannerSession.start` re-checks
+        // permission and surfaces `permission_denied` via the Result's
+        // failure path.
+        mainHandler.post(pending)
+        return true
+    }
+}
+
+class QuadEventStream : EventChannel.StreamHandler {
+    @Volatile private var sink: EventChannel.EventSink? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    override fun onListen(arguments: Any?, events: EventChannel.EventSink?) { sink = events }
+    override fun onCancel(arguments: Any?) { sink = null }
+
+    fun send(payload: Map<String, Any?>) {
+        val s = sink ?: return
+        mainHandler.post {
+            try { s.success(payload) } catch (_: Exception) {}
+        }
+    }
+}

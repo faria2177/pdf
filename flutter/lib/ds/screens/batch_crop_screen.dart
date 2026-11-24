@@ -1,0 +1,598 @@
+import 'dart:io';
+import 'dart:math' as math;
+import 'dart:typed_data';
+import 'dart:ui' as ui;
+
+import 'package:material_ui/material_ui.dart';
+
+import '../services/document_edges.dart';
+import '../services/image_processor.dart';
+import '../theme.dart';
+
+/// Editable crop state is kept separately for every page. Moving to another
+/// page never discards the current four-corner adjustment or rotation.
+class BatchCropPageState {
+  BatchCropPageState()
+      : corners = [...CropQuad.inset().corners];
+
+  final List<Offset> corners;
+  int turns = 0;
+  bool confirmed = false;
+  // Initial machine detection is only a suggestion. Re-editing a previously
+  // saved ID must never overwrite a side the user did not touch.
+  bool touched = false;
+  bool fullImageSelected = false;
+
+  /// The CamScanner-style 'All' tool selects the entire current PHOTO,
+  /// rather than re-running Auto Crop or copying a quad to every page.
+  void selectWholeImage() {
+    corners
+      ..clear()
+      ..addAll(const [
+        Offset(0, 0), Offset(1, 0), Offset(1, 1), Offset(0, 1),
+      ]);
+    fullImageSelected = true;
+    confirmed = true;
+    touched = true;
+  }
+
+  /// Auto Crop after All re-selects the camera's originally visible green
+  /// quad, not a second still-image rectangle. The user must still inspect
+  /// the handles and confirm; invalid coordinate sets cannot be applied.
+  bool restoreCapturedOutline(List<Offset> hint) {
+    if (hint.length != 4 || !CropQuad(hint).isValid) return false;
+    corners..clear()..addAll(hint);
+    confirmed = true;
+    touched = true;
+    fullImageSelected = false;
+    return true;
+  }
+
+  bool updateHandle(int handle, Offset delta) {
+    final proposal = [...corners];
+    if (handle < 4) {
+      proposal[handle] += delta;
+    } else {
+      final a = handle - 4;
+      final b = (a + 1) % 4;
+      proposal[a] += delta;
+      proposal[b] += delta;
+    }
+    // Reject crossed, inverted or off-image quads while dragging any of the
+    // four corner or four edge-midpoint handles.
+    if (!CropQuad(proposal).isValid) return false;
+    corners..clear()..addAll(proposal);
+    confirmed = true;
+    touched = true;
+    fullImageSelected = false;
+    return true;
+  }
+
+  /// Copy the *confirmed* crop geometry to another page. This is only for
+  /// pages intentionally scanned with the same framing; it never runs auto
+  /// detection or changes untouched pages without an explicit All action.
+  static bool matchingPageAspect(double source, double target) =>
+      source.isFinite && target.isFinite &&
+      source > 0 && target > 0 && (source - target).abs() <= .12;
+
+  bool copyCornersFrom(BatchCropPageState other) {
+    if (!other.confirmed || !CropQuad(other.corners).isValid) return false;
+    corners..clear()..addAll(other.corners);
+    confirmed = true;
+    touched = true;
+    fullImageSelected = other.fullImageSelected;
+    return true;
+  }
+
+  List<Offset> get handles => [
+    ...corners,
+    for (var edge = 0; edge < 4; edge++)
+      Offset.lerp(corners[edge], corners[(edge + 1) % 4], .5)!,
+  ];
+}
+
+class BatchCropScreen extends StatefulWidget {
+  const BatchCropScreen({super.key, required this.imagePaths,
+      this.initialIndex = 0, this.preferIdCardBounds = false,
+      this.onlyEdited = false, this.sideLabels = const <String>[],
+      this.comparisonPaths = const <String>[],
+      this.capturedCornerHints = const <int, List<Offset>>{},
+      this.manualOnlyCameraPages = const <int>{} });
+
+  final List<String> imagePaths;
+  final int initialIndex;
+  final bool preferIdCardBounds;
+  /// Preserve every existing saved/filtered side unless the user actually
+  /// dragged a handle, rotated it, or explicitly requested Auto Crop.
+  final bool onlyEdited;
+  final List<String> sideLabels;
+  final List<String> comparisonPaths;
+  /// Raw captured-camera corners, normalized to each upright source image.
+  /// Hints are preview-only until a still detector validates them or the user
+  /// explicitly accepts/adjusts the corners.
+  final Map<int, List<Offset>> capturedCornerHints;
+
+  /// A camera capture that had visible green corners but whose preview/JPEG
+  /// mapping is unknown. Do not display another detector's arbitrary border
+  /// on first review; let the user position the four handles instead.
+  final Set<int> manualOnlyCameraPages;
+
+  @override
+  State<BatchCropScreen> createState() => _BatchCropScreenState();
+}
+
+class _BatchCropScreenState extends State<BatchCropScreen> {
+  late final List<BatchCropPageState> _edits = [
+    for (var i = 0; i < widget.imagePaths.length; i++) BatchCropPageState(),
+  ];
+  final Map<int, Uint8List> _bytes = {};
+  final Map<int, double> _ratios = {};
+  int _index = 0;
+  bool _working = false;
+  String _hint = 'Drag the four corners or edge handles.';
+
+  @override
+  void initState() {
+    super.initState();
+    _index = widget.initialIndex.clamp(0,
+        math.max(0, widget.imagePaths.length - 1)).toInt();
+    _load(_index);
+  }
+
+  Future<void> _load(int index) async {
+    if (_working || _bytes.containsKey(index)) return;
+    setState(() => _working = true);
+    try {
+      final bytes = await File(widget.imagePaths[index]).readAsBytes();
+      final codec = await ui.instantiateImageCodec(bytes);
+      final frame = await codec.getNextFrame();
+      final ratio = frame.image.width / frame.image.height;
+      frame.image.dispose();
+      codec.dispose();
+      if (!mounted) return;
+      setState(() {
+        _bytes[index] = bytes;
+        _ratios[index] = ratio;
+        final hint = widget.capturedCornerHints[index];
+        if (hint != null && hint.length == 4 && CropQuad(hint).isValid) {
+          // The camera already showed these green corners. Opening Adjust
+          // Corners is the explicit review step; Done accepts its visible
+          // selection (and Cancel discards the scan). Requiring a second
+          // hidden "Use captured outline" tap previously saved the WHOLE
+          // original instead of cropping the selected notebook page.
+          _edits[index].restoreCapturedOutline(hint);
+          if (index == _index) {
+            _hint = 'Camera green corners selected. Review or drag them, '
+                'then tap Done to crop this exact document.';
+          }
+        }
+      });
+      if (widget.manualOnlyCameraPages.contains(index)) {
+        if (index == _index && mounted) {
+          setState(() => _hint = 'Camera outline could not be aligned with '
+              'the captured photo. Adjust the four corners manually; '
+              'Done without an adjustment preserves the full photo.');
+        }
+      } else {
+        await _detect(index);
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(() => _hint =
+            'Unable to load this page. The original is unchanged.');
+      }
+    } finally {
+      if (mounted) setState(() => _working = false);
+    }
+  }
+
+  Future<bool> _detect(int index, {bool requested = false}) async {
+    // When returning from All, Auto Crop must return to the four *visible*
+    // camera-capture corners, not silently replace them with the blue cloth
+    // or a larger rectangle suggested by a second detector. A camera hint
+    // appears ONLY for unverified captures; the user reviews the handles
+    // before confirming the crop. Imports have no capturedCornerHints and
+    // still follow their existing Online First / offline detection route.
+    final hint = widget.capturedCornerHints[index];
+    if (hint != null && CropQuad(hint).isValid) {
+      if (requested && mounted) {
+        setState(() {
+          _edits[index].restoreCapturedOutline(hint);
+          if (index == _index) {
+            _hint = 'Captured green document outline restored. '
+                'Review the four corners before Done.';
+          }
+        });
+        return true;
+      }
+      return false;
+    }
+    try {
+      final result = await DocumentEdges.detectSafeStillOutline(
+          widget.imagePaths[index],
+          preferIdCardBounds: widget.preferIdCardBounds);
+      if (!mounted) return false;
+      final points = result?.quad?.points;
+      if (points == null) {
+        if (index == _index) {
+          setState(() => _hint =
+              widget.capturedCornerHints.containsKey(index)
+                  ? 'Captured outline shown. Adjust a handle or accept it '
+                    'before Done; otherwise the original is preserved.'
+                  : 'No reliable outside border. Adjust manually or keep the original.');
+        }
+        return false;
+      } else {
+        setState(() {
+          _edits[index].corners..clear()..addAll(points);
+          _edits[index].confirmed = true;
+          _edits[index].fullImageSelected = false;
+          if (requested) _edits[index].touched = true;
+          if (index == _index) _hint = 'Outside corners found. Review before Done.';
+        });
+        return true;
+      }
+    } catch (_) {
+      if (mounted && index == _index) {
+        setState(() => _hint = 'Auto Crop unavailable; drag the corners manually.');
+      }
+      return false;
+    }
+  }
+
+  Future<void> _autoCrop({bool all = false}) async {
+    if (_working) return;
+    setState(() => _working = true);
+    try {
+      var detected = 0;
+      final total = all ? widget.imagePaths.length : 1;
+      if (all) {
+        for (var i = 0; i < widget.imagePaths.length; i++) {
+          if (await _detect(i, requested: true)) detected++;
+        }
+      } else {
+        if (await _detect(_index, requested: true)) detected++;
+      }
+      if (mounted) {
+        setState(() => _hint = detected == total
+            ? 'Auto Crop found $detected of $total page(s). Review corners before Done.'
+            : 'Auto Crop detected $detected of $total. For the remaining pages, adjust the four corners manually.');
+      }
+    } finally {
+      if (mounted) setState(() => _working = false);
+    }
+  }
+
+  void _selectAllOfCurrentImage() {
+    if (_working) {
+      return;
+    }
+    setState(() {
+      _edits[_index].selectWholeImage();
+      _hint = 'Full image selected. Tap Auto Crop to return to the '
+          'document boundary, or drag the eight handles.';
+    });
+  }
+
+  // Separate batch operation retained for multi-page users. It is no longer
+  // bound to the camera crop editor\'s CamScanner-style 'All' button.
+  Future<void> _applyToPages() async {
+    if (_working) return;
+    if (widget.imagePaths.length == 1) {
+      await _autoCrop();
+      return;
+    }
+    final mode = await showModalBottomSheet<String>(
+      context: context,
+      builder: (sheet) => SafeArea(child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const ListTile(title: Text('Apply to all pages'),
+            subtitle: Text('Choose how the page corners should be updated.')),
+          ListTile(leading: const Icon(Icons.auto_fix_high),
+            title: const Text('Auto Detect All'),
+            subtitle: const Text('Detect each page independently'),
+            onTap: () => Navigator.pop(sheet, 'detect')),
+          ListTile(leading: const Icon(Icons.copy_all_outlined),
+            enabled: _edits[_index].confirmed,
+            title: const Text('Use Current Corners on All'),
+            subtitle: const Text('Use only for pages of the same size and framing'),
+            onTap: () => Navigator.pop(sheet, 'copy')),
+        ],
+      )),
+    );
+    if (!mounted) return;
+    if (mode == 'detect') {
+      await _autoCrop(all: true);
+    } else if (mode == 'copy') {
+      final source = _edits[_index];
+      if (!source.confirmed) return;
+      setState(() => _working = true);
+      var updated = 0;
+      var skipped = 0;
+      try {
+        final sourceRatio = _ratios[_index] ??
+            await _readAspect(widget.imagePaths[_index]);
+        for (var i = 0; i < _edits.length; i++) {
+          if (i == _index) continue;
+          try {
+            final ratio = _ratios[i] ??
+                await _readAspect(widget.imagePaths[i]);
+            // The layout of pages with different aspect ratios is not
+            // compatible with a copied quad. Never cut their content.
+            if (!BatchCropPageState.matchingPageAspect(sourceRatio, ratio)) {
+              skipped++;
+              continue;
+            }
+            if (_edits[i].copyCornersFrom(source)) updated++;
+          } catch (_) {
+            skipped++;
+          }
+        }
+        if (mounted) {
+          setState(() {
+            source.touched = true;
+            _hint = 'Applied corners to $updated other page(s). '
+                '$skipped mismatched/unreadable page(s) left unchanged. '
+                'Review pages before Done.';
+          });
+        }
+      } catch (error) {
+        if (mounted) {
+          setState(() => _hint =
+              'Could not apply corners to all pages: $error');
+        }
+      } finally {
+        if (mounted) setState(() => _working = false);
+      }
+    }
+  }
+
+  Future<double> _readAspect(String path) async {
+    final data = await File(path).readAsBytes();
+    final codec = await ui.instantiateImageCodec(data);
+    try {
+      final frame = await codec.getNextFrame();
+      try {
+        return frame.image.width / frame.image.height;
+      } finally {
+        frame.image.dispose();
+      }
+    } finally {
+      codec.dispose();
+    }
+  }
+
+  void _acceptCapturedOutline() {
+    if (_working || !widget.capturedCornerHints.containsKey(_index)) return;
+    final selected = _edits[_index];
+    if (!CropQuad(selected.corners).isValid) return;
+    setState(() {
+      selected.confirmed = true;
+      selected.touched = true;
+      _hint = 'Captured four corners accepted. Tap Done to apply crop.';
+    });
+  }
+
+  Future<void> _changePage(int index) async {
+    if (_working || index < 0 || index >= widget.imagePaths.length) return;
+    setState(() { _index = index; _hint = 'Drag corners to refine this page.'; });
+    await _load(index);
+  }
+
+  void _rotate(int delta) {
+    if (_working) return;
+    setState(() {
+      _edits[_index].turns = (_edits[_index].turns + delta + 4) % 4;
+      _edits[_index].touched = true;
+    });
+  }
+
+  Future<void> _done() async {
+    if (_working) return;
+    setState(() { _working = true; _hint = 'Applying page corrections…'; });
+    try {
+      final output = <int, Uint8List>{};
+      for (var i = 0; i < widget.imagePaths.length; i++) {
+        final edit = _edits[i];
+        if (widget.onlyEdited && !edit.touched) continue;
+        if (!edit.confirmed && edit.turns == 0) continue;
+        if (edit.confirmed && !CropQuad(edit.corners).isValid) {
+          throw const FormatException('Invalid document corners.');
+        }
+        final source = _bytes[i] ?? await File(widget.imagePaths[i]).readAsBytes();
+        output[i] = await ImageProcessor.process(source,
+          crop: edit.confirmed && !edit.fullImageSelected
+              ? CropQuad(edit.corners) : null,
+          rotateDegrees: edit.turns * 90,
+        );
+      }
+      if (mounted) Navigator.pop(context, output);
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('Could not apply crop: $error')));
+      }
+    } finally {
+      if (mounted) setState(() => _working = false);
+    }
+  }
+
+  Future<void> _compare() async {
+    if (_working || _index >= widget.comparisonPaths.length) return;
+    final current = widget.comparisonPaths[_index];
+    final original = widget.imagePaths[_index];
+    await showDialog<void>(context: context, builder: (dialog) => Dialog(
+      backgroundColor: const Color(0xFF232428),
+      child: Padding(padding: const EdgeInsets.all(12),
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          const Text('Compare', style: TextStyle(
+            color: Colors.white, fontSize: 17)),
+          const SizedBox(height: 12),
+          Row(children: [
+            for (final entry in [('Original', original), ('Current', current)])
+              Expanded(child: Column(children: [
+                Text(entry.$1, style: const TextStyle(color: Colors.white70)),
+                const SizedBox(height: 8),
+                SizedBox(height: 210, child: Image.file(File(entry.$2),
+                    fit: BoxFit.contain)),
+              ])),
+          ]),
+          TextButton(onPressed: () => Navigator.pop(dialog),
+            child: const Text('Close')),
+        ]),
+      ),
+    ));
+  }
+
+  Widget _tool(IconData icon, String title, VoidCallback action) =>
+      Expanded(child: InkWell(onTap: _working ? null : action,
+        child: Column(mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(icon, size: 23, color: Colors.white),
+            const SizedBox(height: 4),
+            Text(title, style: const TextStyle(color: Colors.white, fontSize: 11)),
+          ])));
+
+  @override
+  Widget build(BuildContext context) {
+    final edit = _edits[_index];
+    final bytes = _bytes[_index];
+    final ratio = _ratios[_index] ?? .7;
+    return PopScope(canPop: !_working, child: Scaffold(
+      backgroundColor: const Color(0xFF141517),
+      appBar: AppBar(
+        backgroundColor: const Color(0xFF141517),
+        foregroundColor: Colors.white,
+        title: Text(widget.sideLabels.isEmpty ? 'Adjust Corners' : 'Crop',
+            style: const TextStyle(fontSize: 17)),
+        actions: [
+          if (widget.imagePaths.length > 1)
+            IconButton(
+              tooltip: 'Apply crop to all pages',
+              onPressed: _working ? null : _applyToPages,
+              icon: const Icon(Icons.copy_all_outlined),
+            ),
+          if (widget.comparisonPaths.length == widget.imagePaths.length)
+            TextButton.icon(
+              onPressed: _working ? null : _compare,
+              icon: const Icon(Icons.compare, color: Colors.white),
+              label: const Text('Compare', style: TextStyle(color: Colors.white)),
+            ),
+        ],
+      ),
+      body: SafeArea(child: Column(children: [
+        if (_working) const LinearProgressIndicator(color: dsTeal),
+        Expanded(child: Center(child: LayoutBuilder(
+          builder: (_, box) {
+            final displayRatio = edit.turns.isOdd ? 1 / ratio : ratio;
+            final displayWidth = math.max(1.0, math.min(
+              box.maxWidth - 22, (box.maxHeight - 22) * displayRatio));
+            final displayHeight = displayWidth / displayRatio;
+            final width = edit.turns.isOdd ? displayHeight : displayWidth;
+            final height = edit.turns.isOdd ? displayWidth : displayHeight;
+            return bytes == null
+                ? const Center(child: CircularProgressIndicator(color: dsTeal))
+                : RotatedBox(quarterTurns: edit.turns,
+                    child: SizedBox(width: width, height: height,
+                      child: Stack(children: [
+                        Positioned.fill(child: Image.memory(bytes, fit: BoxFit.fill)),
+                        Positioned.fill(child: CustomPaint(
+                          painter: _BatchCropOverlay(edit.corners))),
+                        for (var handle = 0; handle < 8; handle++)
+                          Positioned(
+                            left: edit.handles[handle].dx * width - 18,
+                            top: edit.handles[handle].dy * height - 18,
+                            child: GestureDetector(
+                              behavior: HitTestBehavior.opaque,
+                              onPanUpdate: (details) {
+                                if (_working) return;
+                                final moved = edit.updateHandle(handle,
+                                  Offset(details.delta.dx / width,
+                                         details.delta.dy / height));
+                                if (moved) setState(() {});
+                              },
+                              child: SizedBox(width: 36, height: 36,
+                                child: Center(child: Container(
+                                  width: handle < 4 ? 13 : 19,
+                                  height: handle < 4 ? 13 : 7,
+                                  decoration: BoxDecoration(color: Colors.white,
+                                    borderRadius: BorderRadius.circular(7),
+                                    border: Border.all(color: dsTeal, width: 2)),
+                                ))),
+                            ),
+                          ),
+                      ])));
+          },
+        ))),
+        Text(_hint, textAlign: TextAlign.center,
+          style: const TextStyle(color: Colors.white60, fontSize: 11)),
+        if (widget.capturedCornerHints.containsKey(_index) &&
+            !edit.confirmed)
+          TextButton.icon(
+            onPressed: _working ? null : _acceptCapturedOutline,
+            icon: const Icon(Icons.check_circle_outline, color: dsTeal),
+            label: const Text('Use captured outline',
+                style: TextStyle(color: dsTeal)),
+          ),
+        Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+          IconButton(onPressed: _working || _index == 0 ? null :
+              () => _changePage(_index - 1),
+              icon: const Icon(Icons.chevron_left), color: Colors.white),
+          Text(widget.sideLabels.length == widget.imagePaths.length
+                ? '${widget.sideLabels[_index]} · ${_index + 1}/${widget.imagePaths.length}'
+                : '${_index + 1}/${widget.imagePaths.length}',
+            style: const TextStyle(color: Colors.white70)),
+          IconButton(onPressed: _working || _index + 1 >= widget.imagePaths.length
+              ? null : () => _changePage(_index + 1),
+              icon: const Icon(Icons.chevron_right), color: Colors.white),
+        ]),
+        Container(height: 76, color: const Color(0xFF27292C),
+          child: Row(children: [
+            _tool(Icons.rotate_left, 'Left', () => _rotate(3)),
+            _tool(Icons.rotate_right, 'Right', () => _rotate(1)),
+            _tool(Icons.crop_free, 'Auto Crop', () => _autoCrop()),
+            _tool(Icons.select_all, 'All', _selectAllOfCurrentImage),
+          ])),
+        Container(height: 48, color: const Color(0xFF27292C),
+          child: Row(children: [
+            TextButton.icon(onPressed: _working ? null : () => Navigator.pop(context),
+              icon: const Icon(Icons.close, color: Colors.white),
+              label: const Text('Cancel', style: TextStyle(color: Colors.white))),
+            const Spacer(),
+            TextButton.icon(onPressed: _working ? null : _done,
+              icon: const Icon(Icons.check, color: dsTeal),
+              label: const Text('Done', style: TextStyle(color: dsTeal))),
+          ])),
+      ])),
+    ));
+  }
+}
+
+class _BatchCropOverlay extends CustomPainter {
+  const _BatchCropOverlay(this.corners);
+  final List<Offset> corners;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final mapped = corners.map((p) => Offset(p.dx * size.width,
+        p.dy * size.height)).toList();
+    final border = Path()..moveTo(mapped[0].dx, mapped[0].dy);
+    for (final point in mapped.skip(1)) { border.lineTo(point.dx, point.dy); }
+    border.close();
+    canvas.drawPath(border, Paint()..color = dsTeal.withValues(alpha: .13));
+    canvas.drawPath(border, Paint()..color = dsTeal
+        ..strokeWidth = 2.5..style = PaintingStyle.stroke);
+    final grid = Paint()..color = Colors.white.withValues(alpha: .6)
+        ..strokeWidth = .7;
+    for (var n = 1; n < 3; n++) {
+      canvas.drawLine(Offset.lerp(mapped[0], mapped[3], n / 3)!,
+          Offset.lerp(mapped[1], mapped[2], n / 3)!, grid);
+      canvas.drawLine(Offset.lerp(mapped[0], mapped[1], n / 3)!,
+          Offset.lerp(mapped[3], mapped[2], n / 3)!, grid);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _BatchCropOverlay old) => true;
+}

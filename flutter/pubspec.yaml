@@ -1,7 +1,7 @@
 name: pdf_studio
 description: "PDF Studio — a native Flutter PDF reader and page organizer inspired by PdfCraft."
 publish_to: 'none'
-version: 1.5.1+7
+version: 1.6.0+8
 
 environment:
   sdk: ^3.14.0
@@ -24,7 +24,13 @@ dependencies:
   jpeg_encode: ^1.0.1
   archive: ^4.0.7
   url_launcher: ^6.3.3
-  google_mlkit_document_scanner: ^0.7.2
+  # DocScanner (DS-Fult) camera scanner: live four-corner detection (own C++ engine,
+  # OpenCV, DocNet), perspective crop, batch and ID-card modes.
+  doclens:
+    path: third_party/doclens
+  camera: ^0.12.2
+  image: ^4.12.0
+  image_picker: ^1.2.4
 
 dev_dependencies:
   flutter_test:

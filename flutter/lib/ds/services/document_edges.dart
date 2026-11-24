@@ -1,0 +1,962 @@
+import 'dart:io';
+import 'dart:math' as math;
+import 'dart:ui' show Offset;
+
+import 'package:doclens/doclens.dart';
+import 'package:flutter/foundation.dart';
+import 'package:path/path.dart' as p;
+
+import 'background_contrast_contour.dart';
+import 'image_processor.dart';
+import 'offline_document_contour.dart';
+import 'paper_region_detector.dart';
+import 'online_auto_crop_service.dart';
+import 'salient_document_detector.dart';
+import 'quad_edge_refiner.dart';
+
+/// The same on-device document contour detector is used by camera capture,
+/// gallery auto-crop and the manual corner editor.
+class DocumentEdges {
+  /// Deterministic offline/online integration seam for widget/unit tests.
+  @visibleForTesting
+  static Future<OnlineCropCandidate?> Function(String, bool)?
+      onlineDetectorForTesting;
+
+  static const scannerConfig = ScannerConfig(
+    // Never fire the camera automatically. Edge detection and auto-crop still
+    // run; the user chooses when to take the picture.
+    enableAutoCapture: false,
+    enableAutoCaptureConfirmation: false,
+    detectionPolarity: DetectionPolarity.auto,
+    // A smaller offset helps in dim scenes and on lightly coloured ID cards.
+    detectionThresholdOffset: 12,
+    detectionThrottleHz: 12,
+    enableQuadSmoothing: true,
+    // Identity-aware tracking rejects stray rectangles before smoothing;
+    // seven frames keep edges steady without the lag of a nine-frame median.
+    quadSmoothingWindow: 7,
+    enablePerspectiveWarp: true,
+    enableSharpnessGate: true,
+    sharpnessFloor: 8.5,
+    autoCaptureCornerThreshold: .014,
+    autoCaptureStabilityDuration: Duration(milliseconds: 1100),
+    autoCaptureConfirmationDelay: Duration(milliseconds: 400),
+    enableLowLightDetection: true,
+    enableStabilityStatus: true,
+    enableTapToFocus: true,
+    captureResolution: Resolution.max,
+  );
+
+  /// Keep the normal A4 detector unchanged. Card capture must favour the
+  /// smaller, centred card over an application form underneath it.
+  static const idCardScannerConfig = ScannerConfig(
+    enableAutoCapture: false,
+    enableAutoCaptureConfirmation: false,
+    detectionPolarity: DetectionPolarity.auto,
+    detectionThresholdOffset: 12,
+    detectionThrottleHz: 12,
+    enableQuadSmoothing: true,
+    quadSmoothingWindow: 7,
+    enablePerspectiveWarp: true,
+    enableSharpnessGate: true,
+    sharpnessFloor: 8.5,
+    enableLowLightDetection: true,
+    enableStabilityStatus: true,
+    enableTapToFocus: true,
+    captureResolution: Resolution.max,
+    preferIdCardBounds: true,
+  );
+
+  /// A null result means that the native detector did not find a reliable
+  /// convex four-corner boundary. Never invent a crop in that situation.
+  static Future<ImageDetection?> detect(String imagePath,
+      {bool preferIdCardBounds = false}) async {
+    final detection = await DoclensPlatform.instance.detectInImage(
+      imagePath: imagePath,
+      config: preferIdCardBounds ? idCardScannerConfig : scannerConfig,
+    );
+    final quad = detection?.quad;
+    if (quad == null || !CropQuad(quad.points).isValid) {
+      _log(imagePath, 'native ${preferIdCardBounds ? 'card' : 'page'} pass: no valid quadrilateral');
+      return null;
+    }
+    return detection;
+  }
+
+  static void _log(String imagePath, String reason) {
+    if (kDebugMode) {
+      debugPrint('[AutoCrop] ${p.basename(imagePath)}: $reason');
+    }
+  }
+
+  static bool _reject(String gate, String reason) {
+    if (kDebugMode) debugPrint('[AutoCrop] $gate rejected: $reason');
+    return false;
+  }
+
+  /// A gallery photo has no live-camera page outline to cross-check against.
+  /// Never irreversibly warp it to a small inner text/table rectangle. Such a
+  /// false positive is particularly destructive for identity cards imported
+  /// through the normal Scan tab: the name block survives but the photo,
+  /// header and card number disappear. Uncertain imports retain their full
+  /// original photo and can still be cropped manually.
+  ///
+  /// The dedicated ID-card detector already has its own card-size policy;
+  /// do not apply A4 page geometry to that explicit workflow.
+  static bool isReliableGalleryCrop(ImageDetection detection,
+      {bool preferIdCardBounds = false}) {
+    final quad = detection.quad;
+    final imageSize = detection.imageSize;
+    if (quad == null || imageSize.width <= 0 || imageSize.height <= 0) {
+      return _reject('gallery', 'missing quad or image dimensions');
+    }
+    final points = quad.points;
+    if (points.any((point) => !point.dx.isFinite || !point.dy.isFinite ||
+        point.dx < 0 || point.dx > 1 || point.dy < 0 || point.dy > 1)) {
+      return _reject('gallery', 'out-of-bounds or non-finite corners');
+    }
+    if (preferIdCardBounds) return true;
+
+    final area = quad.area;
+    // Below this, a strong-looking rectangle is often a printed *part* of a
+    // document. A conservative original beats an unrecoverable partial scan.
+    if (area < .30) return _reject('gallery', 'coverage ${area.toStringAsFixed(3)} < .30');
+
+    final pixelPoints = quad.scaleToSize(imageSize).points;
+    final horizontal = ((pixelPoints[1] - pixelPoints[0]).distance +
+            (pixelPoints[2] - pixelPoints[3]).distance) /
+        2;
+    final vertical = ((pixelPoints[3] - pixelPoints[0]).distance +
+            (pixelPoints[2] - pixelPoints[1]).distance) /
+        2;
+    final shortSide = horizontal < vertical ? horizontal : vertical;
+    final longSide = horizontal > vertical ? horizontal : vertical;
+    if (shortSide <= 0 || longSide / shortSide > 1.95) {
+      return _reject('gallery', 'aspect ${shortSide <= 0 ? 'invalid' : (longSide / shortSide).toStringAsFixed(2)} > 1.95');
+    }
+
+    final left = points.map((p) => p.dx).reduce((a, b) => a < b ? a : b);
+    final right = points.map((p) => p.dx).reduce((a, b) => a > b ? a : b);
+    final top = points.map((p) => p.dy).reduce((a, b) => a < b ? a : b);
+    final bottom = points.map((p) => p.dy).reduce((a, b) => a > b ? a : b);
+    // A text strip can touch the *left and right* photo boundaries, bypassing
+    // the four-sided inset check below. That is what the 381861.mp4 NID crop
+    // looks like: width fills the frame but face/header above it disappear.
+    // A complete card or page must not turn into a horizontal/vertical band.
+    final spanX = right - left;
+    final spanY = bottom - top;
+    if (area < .64 &&
+        ((spanX > .79 && spanY < .62) ||
+         (spanY > .79 && spanX < .62))) {
+      return _reject('gallery', 'incomplete page strip: spanX=${spanX.toStringAsFixed(2)}, spanY=${spanY.toStringAsFixed(2)}');
+    }
+    // A compact box surrounded by unselected image on *all four sides* is
+    // likely the interior of a page/card, not its outside paper boundary.
+    if (area < .56 && left > .045 && right < .955 &&
+        top > .065 && bottom < .935) {
+      return _reject('gallery', 'inner printed box, coverage=${area.toStringAsFixed(3)}');
+    }
+    return true;
+  }
+
+  /// The regular Scan detector can lock onto the printed name box of an ID
+  /// photo. When this happens, an independent card-mode pass may recover the
+  /// *outer* card. Accept that alternative only if it actually surrounds the
+  /// original candidate, is substantially larger and has card-like geometry.
+  /// Otherwise keep the uncropped gallery photo for manual review.
+  static bool isCredibleOuterCardAlternative(
+      ImageDetection inner, ImageDetection outer) {
+    final innerQuad = inner.quad;
+    final outerQuad = outer.quad;
+    if (innerQuad == null || outerQuad == null) return false;
+    if ((inner.imageSize.width - outer.imageSize.width).abs() > 1 ||
+        (inner.imageSize.height - outer.imageSize.height).abs() > 1) {
+      return false;
+    }
+    final outerArea = outerQuad.area;
+    if (!isCredibleStandaloneCard(outer) ||
+        outerArea < innerQuad.area * 1.45) {
+      return false;
+    }
+    if (!innerQuad.points.every(outerQuad.contains)) return false;
+
+    return true;
+  }
+
+  /// Independent card-mode results must pass stricter geometry before they
+  /// can crop a normal Scan import whose page detector returned *nothing*.
+  /// A compact central text box is easy to mistake for a card, so require
+  /// substantial coverage, an actual landscape-card ratio and a near-centred
+  /// fully visible outline. A weak result keeps the unmodified original.
+  static bool isCredibleStandaloneCard(ImageDetection detection) =>
+      _isCardShaped(detection, minArea: .19);
+
+  /// Card-camera fallback gate. A detector that already separated one object
+  /// from its surface (segmentation model / background contrast) may return
+  /// a smaller business card; the aspect, centre and frame rules still apply.
+  static bool _isCardShaped(ImageDetection detection,
+      {required double minArea, double maxAspect = 2.10}) {
+    final quad = detection.quad;
+    final size = detection.imageSize;
+    if (quad == null || size.width <= 0 || size.height <= 0 ||
+        !CropQuad(quad.points).isValid) {
+      return _reject('card', 'invalid quad or image dimensions');
+    }
+    final area = quad.area;
+    // A complete coloured ID photographed on ruled notebook paper can cover
+    // only ~20% of the image. The dedicated native card pass independently
+    // checks chroma, outside corners and aspect ratio before returning it.
+    // Still reject tiny printed name blocks and near-full background pages.
+    if (area < minArea || area > .86) {
+      return _reject('card', 'coverage ${area.toStringAsFixed(3)} outside '
+          '${minArea.toStringAsFixed(2)}–.86');
+    }
+    if (quad.points.any((p) => !p.dx.isFinite || !p.dy.isFinite ||
+        p.dx < .004 || p.dx > .996 || p.dy < .004 || p.dy > .996)) {
+      return _reject('card', 'corner too close to image frame');
+    }
+    final cx = quad.points.map((p) => p.dx).reduce((a, b) => a + b) / 4;
+    final cy = quad.points.map((p) => p.dy).reduce((a, b) => a + b) / 4;
+    if ((cx - .5).abs() > .22 || (cy - .5).abs() > .22) {
+      return _reject('card', 'off-centre candidate ($cx, $cy)');
+    }
+
+    final points = quad.scaleToSize(size).points;
+    final width = ((points[1] - points[0]).distance +
+        (points[2] - points[3]).distance) / 2;
+    final height = ((points[3] - points[0]).distance +
+        (points[2] - points[1]).distance) / 2;
+    if (width <= 0 || height <= 0) return _reject('card', 'invalid side length');
+    final ratio = width > height ? width / height : height / width;
+    if (ratio < 1.48 || ratio > maxAspect) {
+      return _reject('card', 'aspect ${ratio.toStringAsFixed(2)} outside '
+          '1.48–${maxAspect.toStringAsFixed(2)}');
+    }
+    return true;
+  }
+
+  /// A near-frame contour can be the notebook/tabletop surrounding a smaller
+  /// card (381861.mp4). Replace such a broad background *only* with a fully
+  /// enclosed and strongly card-shaped independent proposal. A normal A4
+  /// inset several percent from the camera border remains authoritative.
+  static bool isCredibleCardInsideBackground(
+      ImageDetection background, ImageDetection card) {
+    final whole = background.quad;
+    final inner = card.quad;
+    if (whole == null || inner == null || !isCredibleStandaloneCard(card)) {
+      return false;
+    }
+    if ((background.imageSize.width - card.imageSize.width).abs() > 1 ||
+        (background.imageSize.height - card.imageSize.height).abs() > 1) {
+      return false;
+    }
+    if (whole.area < .76 || inner.area < .19 ||
+        inner.area > whole.area * .78 ||
+        !inner.points.every(whole.contains)) {
+      return false;
+    }
+    return _nearFrameOnThreeSides(whole);
+  }
+
+  /// A dark plastic sleeve or clipboard can be a closed, inset quadrilateral
+  /// itself, so the near-frame test alone is insufficient. Only a second,
+  /// smaller complete ID with strong *four-side colour evidence* can replace
+  /// that broad native result. This deliberately does not apply to an
+  /// arbitrary inner printed rectangle.
+  static bool isCredibleCardInsideHolder(ImageDetection holder,
+      ImageDetection card, {required double borderEvidence}) {
+    final outer = holder.quad;
+    final inner = card.quad;
+    if (outer == null || inner == null || borderEvidence < .67 ||
+        !isCredibleStandaloneCard(card)) {
+      return false;
+    }
+    if ((holder.imageSize.width - card.imageSize.width).abs() > 1 ||
+        (holder.imageSize.height - card.imageSize.height).abs() > 1 ||
+        outer.area < .49 || inner.area > outer.area * .72 ||
+        !inner.points.every(outer.contains)) {
+      return false;
+    }
+    // An ordinary portrait A4 sheet may contain a large inset chart. A
+    // landscape holder surrounding a landscape ID is a different scene.
+    final outerPoints = outer.scaleToSize(holder.imageSize).points;
+    final outerWidth = ((outerPoints[1] - outerPoints[0]).distance +
+        (outerPoints[2] - outerPoints[3]).distance) / 2;
+    final outerHeight = ((outerPoints[3] - outerPoints[0]).distance +
+        (outerPoints[2] - outerPoints[1]).distance) / 2;
+    if (outerWidth < outerHeight * 1.08) return false;
+    // The candidate must have visible exterior clearance on all sides;
+    // matching the holder itself is not a reason to warp the same image twice.
+    final ox = outer.points.map((p) => p.dx).toList();
+    final oy = outer.points.map((p) => p.dy).toList();
+    final ix = inner.points.map((p) => p.dx).toList();
+    final iy = inner.points.map((p) => p.dy).toList();
+    double low(List<double> values) => values.reduce(math.min);
+    double high(List<double> values) => values.reduce(math.max);
+    return low(ix) - low(ox) >= .022 && high(ox) - high(ix) >= .022 &&
+        low(iy) - low(oy) >= .022 && high(oy) - high(iy) >= .022;
+  }
+
+  /// A camera may report the surrounding notebook as a valid, fairly inset
+  /// page. It is *not* necessarily near three image sides, so that old guard
+  /// misses a large gold/coloured ID on ruled paper. An independently
+  /// segmented, sizeable coloured card with evidence from its real outside
+  /// border can replace that proposal without admitting tiny inner labels.
+  /// This does not affect the usual A4 scan or a plain white paper page.
+  static bool isCredibleColoredCardOverPage(
+      ImageDetection page, OfflineContourResult proposed) {
+    final outer = page.quad;
+    final card = proposed.detection;
+    final inner = card.quad;
+    if (outer == null || inner == null ||
+        !proposed.colorOnNeutralBackground ||
+        proposed.borderEvidence < .56 ||
+        !isCredibleStandaloneCard(card)) {
+      return false;
+    }
+    if ((page.imageSize.width - card.imageSize.width).abs() > 1 ||
+        (page.imageSize.height - card.imageSize.height).abs() > 1 ||
+        outer.area < .62 || inner.area < .28 ||
+        inner.area < outer.area * .51 ||
+        inner.area > outer.area * .84 ||
+        !inner.points.every(outer.contains)) {
+      return false;
+    }
+    return true;
+  }
+
+  /// A pale ID inside a reflective grey sleeve over a dark table is a
+  /// different scene from a narrow printed name box on white A4 paper.
+  /// Require independently segmented near-white surface and strong evidence
+  /// from all four outside edges before allowing a compact landscape crop.
+  static bool isVerifiedWhiteCardOnDark(
+      ImageDetection? existing, OfflineContourResult proposed) {
+    if (!proposed.whiteOnDarkBackground) return false;
+    final quad = proposed.detection.quad;
+    if (quad == null) return false;
+    final points = quad.points;
+    final left = points.map((p) => p.dx).reduce(math.min);
+    final right = points.map((p) => p.dx).reduce(math.max);
+    final top = points.map((p) => p.dy).reduce(math.min);
+    final bottom = points.map((p) => p.dy).reduce(math.max);
+    final pixel = quad.scaleToSize(proposed.detection.imageSize).points;
+    final cardWidth = ((pixel[1] - pixel[0]).distance +
+        (pixel[2] - pixel[3]).distance) / 2;
+    final cardHeight = ((pixel[3] - pixel[0]).distance +
+        (pixel[2] - pixel[1]).distance) / 2;
+    final ratio = math.max(cardWidth, cardHeight) /
+        math.max(1, math.min(cardWidth, cardHeight));
+    final frameWideCard = proposed.borderEvidence >= .45 &&
+        quad.area >= .40 && quad.area <= .78 &&
+        right - left >= .89 && bottom - top >= .42 &&
+        bottom - top <= .78 && top >= .055 && bottom <= .94 &&
+        ratio >= 1.15 && ratio <= 2.15;
+    if (!frameWideCard && (proposed.borderEvidence < .57 ||
+        !isCredibleStandaloneCard(proposed.detection))) {
+      return false;
+    }
+    final inner = proposed.detection.quad;
+    if (inner == null) return false;
+    if (existing == null || existing.quad == null) return true;
+    final outer = existing.quad!;
+    if ((existing.imageSize.width - proposed.detection.imageSize.width).abs() > 1 ||
+        (existing.imageSize.height - proposed.detection.imageSize.height).abs() > 1) {
+      return false;
+    }
+    final same = outer.points.asMap().entries.every((entry) =>
+        (entry.value - inner.points[entry.key]).distance < .06);
+    if (same) return true;
+    // Frame-wide detection preserves the entire lateral source. A false
+    // native rectangle should not stop safe top/bottom background trimming.
+    if (frameWideCard && !isReliableGalleryCrop(existing)) return true;
+    // Only an enclosing larger sleeve/page can be replaced. Do not crop a
+    // physically unrelated white printed inset from a well-framed page.
+    return outer.area >= inner.area * 1.18 &&
+        inner.points.every(outer.contains);
+  }
+
+  /// A ruled notebook/tabletop detected as the outer quadrilateral nearly
+  /// fills the photo. Its four-sided frame evidence is very different from a
+  /// properly framed paper page with a visible margin on every side.
+  static bool _nearFrameOnThreeSides(Quad quad) {
+    final xs = quad.points.map((p) => p.dx).toList();
+    final ys = quad.points.map((p) => p.dy).toList();
+    final frameSides = [
+      xs.reduce((a, b) => a < b ? a : b) < .065,
+      xs.reduce((a, b) => a > b ? a : b) > .935,
+      ys.reduce((a, b) => a < b ? a : b) < .065,
+      ys.reduce((a, b) => a > b ? a : b) > .935,
+    ].where((touches) => touches).length;
+    return frameSides >= 3;
+  }
+
+  /// Convert the quad associated with a captured CameraX still into the
+  /// *same upright raw-image pixel space* that the manual editor displays.
+  /// Unlike a stale preview box, ScanResult stores the raw output dimensions
+  /// together with these corners. This hint may seed the editor, but must not
+  /// silently force a crop of an unverified page.
+  static CropQuad? captureQuadHint(ScanResult capture,
+      {bool preferIdCardBounds = false}) {
+    final size = capture.rawImageSize;
+    if (!size.width.isFinite || !size.height.isFinite ||
+        size.width < 16 || size.height < 16) {
+      return null;
+    }
+    // CameraX can lose its still-image detector after capturing a correctly
+    // tracked document (e.g. grey drawn page beside a lined white page).
+    // Native then returns a full-frame sentinel in detectedQuad. Prefer the
+    // *separate*, orientation-mapped visible green quad for MANUAL review.
+    // This hint is never automatic proof of the still's document edges.
+    final source = capture.liveOutlineAtShutter && capture.reviewQuad != null
+        ? capture.reviewQuad!
+        : capture.detectedQuad;
+    final points = source.points.map(
+      (p) => Offset(p.dx / size.width, p.dy / size.height),
+    ).toList(growable: false);
+    final candidate = CropQuad(points);
+    if (!candidate.isValid) return null;
+    final quad = Quad(
+      topLeft: points[0], topRight: points[1],
+      bottomRight: points[2], bottomLeft: points[3],
+    );
+    // A full-frame rectangle is the native payload's sentinel for "nothing
+    // found", not a real contour. Do not recreate the false border.
+    if (quad.area > .94 || quad.area < .045) return null;
+    if (capture.reviewQuad != null && capture.liveOutlineAtShutter) {
+      // Already converted into the persisted raw JPEG's coordinates. Let the
+      // user adjust/explicitly accept the exact camera green four corners
+      // regardless of still-only contour detector failure. Gallery and
+      // imported file detection never use this path.
+      final px = quad.scaleToSize(size).points;
+      final w = ((px[1] - px[0]).distance +
+                 (px[2] - px[3]).distance) / 2;
+      final h = ((px[3] - px[0]).distance +
+                 (px[2] - px[1]).distance) / 2;
+      if (w <= 0 || h <= 0) return null;
+      final ratio = math.max(w, h) / math.min(w, h);
+      return ratio >= 1.02 && ratio <= 3.5 ? candidate : null;
+    }
+    final detection = ImageDetection(quad: quad, imageSize: size);
+    if (preferIdCardBounds) {
+      // A small photo of a card may still use these corners for *manual*
+      // alignment, but do not treat them as verified for auto-cropping.
+      return candidate;
+    }
+    // Ordinary Scan auto-crop retains the strict whole-page checks.
+    if (isReliableGalleryCrop(detection)) {
+      return candidate;
+    }
+    // In the CAMERA ONLY, a genuinely visible green box can also surround
+    // a small white business card (~10% of the screen in 382753.mp4).
+    // Show its native captured corners as MANUAL handles when independent
+    // captured-still segmentation could not verify the actual paper border.
+    // Do not inherit this relaxed gate for gallery/image imports, and never
+    // auto-warp this unverified hint.
+    if (!capture.liveOutlineAtShutter) {
+      return null;
+    }
+    final area = quad.area;
+    if (area < .045 || area > .36) {
+      return null;
+    }
+    final px = quad.scaleToSize(size).points;
+    final width = ((px[1] - px[0]).distance + (px[2] - px[3]).distance) / 2;
+    final height = ((px[3] - px[0]).distance + (px[2] - px[1]).distance) / 2;
+    if (width <= 0 || height <= 0) {
+      return null;
+    }
+    final ratio = math.max(width, height) / math.min(width, height);
+    final center = Offset(
+      points.map((p) => p.dx).reduce((a, b) => a + b) / 4,
+      points.map((p) => p.dy).reduce((a, b) => a + b) / 4,
+    );
+    if (ratio < 1.24 || ratio > 2.55 ||
+        (center.dx - .5).abs() > .28 ||
+        (center.dy - .5).abs() > .28) {
+      return null;
+    }
+    return candidate;
+  }
+
+  /// A pixel edge-snapping pass is a refinement, not a new detector.
+  /// Never let it replace a validated outer document with a clipped inner
+  /// printed border, a near-frame rectangle or invalid corner geometry.
+  ///
+  /// This is deliberately independent of the image decoder, so the exact
+  /// constraints can be regression-tested with synthetic corners.
+  @visibleForTesting
+  static bool isSafeRefinement(
+    ImageDetection original,
+    ImageDetection refined, {
+    bool preferIdCardBounds = false,
+  }) {
+    final before = original.quad;
+    final after = refined.quad;
+    if (before == null || after == null ||
+        original.imageSize.width <= 0 || original.imageSize.height <= 0 ||
+        (original.imageSize.width - refined.imageSize.width).abs() > 1 ||
+        (original.imageSize.height - refined.imageSize.height).abs() > 1 ||
+        !CropQuad(after.points).isValid) {
+      return false;
+    }
+    final previousArea = before.area;
+    final nextArea = after.area;
+    if (!previousArea.isFinite || !nextArea.isFinite ||
+        previousArea <= 0 ||
+        nextArea < previousArea * .92 ||
+        nextArea > previousArea * 1.24) {
+      return false;
+    }
+
+    // A line fit is permitted to adjust a boundary by a few image
+    // percentage points. Big corner jumps are almost always a different
+    // rectangle (table, border, plastic sleeve) rather than the paper edge.
+    for (var i = 0; i < 4; i++) {
+      if ((before.points[i] - after.points[i]).distance > .075) return false;
+    }
+    final beforeCentre = Offset(
+      before.points.map((p) => p.dx).reduce((a, b) => a + b) / 4,
+      before.points.map((p) => p.dy).reduce((a, b) => a + b) / 4,
+    );
+    final afterCentre = Offset(
+      after.points.map((p) => p.dx).reduce((a, b) => a + b) / 4,
+      after.points.map((p) => p.dy).reduce((a, b) => a + b) / 4,
+    );
+    if ((beforeCentre - afterCentre).distance > .035) return false;
+
+    if (preferIdCardBounds || (
+        original.quad!.area < .30 && isCredibleStandaloneCard(original))) {
+      return isCredibleStandaloneCard(refined);
+    }
+    return isReliableGalleryCrop(refined);
+  }
+
+  static Future<ImageDetection> _refineSafely(
+    String imagePath,
+    ImageDetection detection, {
+    bool preferIdCardBounds = false,
+  }) async {
+    final proposed = await QuadEdgeRefiner.refine(imagePath, detection);
+    if (isSafeRefinement(detection, proposed,
+        preferIdCardBounds: preferIdCardBounds)) {
+      return proposed;
+    }
+    _log(imagePath, 'pixel edge refinement rejected; kept original four corners');
+    return detection;
+  }
+
+  /// Used by *both* automatic gallery import and Adjust corners → Auto
+  /// Detect. Neither route may promote an interior table/name block to a
+  /// complete document. Try the independent card outline even when the
+  /// ordinary page detector returned null; otherwise leave the photo whole.
+  ///
+  /// [galleryDetectors] enables the segmentation model and the
+  /// background-contrast fallback, which were tuned for imported photos.
+  /// Camera captures pass false and keep their proven detector chain.
+  static Future<ImageDetection?> detectSafeStillOutline(String imagePath,
+      {bool preferIdCardBounds = false, bool galleryDetectors = true}) async {
+    // Online First applies to still images only (not live CameraX frames).
+    // Explicit opt-in and a private HTTPS endpoint are required; malformed or
+    // misleading cloud coordinates never bypass local crop-safety gates.
+    try {
+      final online = onlineDetectorForTesting != null
+          ? await onlineDetectorForTesting!(imagePath, preferIdCardBounds)
+          : await const OnlineAutoCropService().detect(imagePath,
+              preferIdCardBounds: preferIdCardBounds);
+      if (online != null) {
+        final page = online.documentType == 'document' &&
+            online.confidence >= .86 &&
+            isReliableGalleryCrop(online.detection);
+        final card = online.documentType == 'id_card' &&
+            online.confidence >= .90 &&
+            isCredibleStandaloneCard(online.detection);
+        if (page || card) {
+          _log(imagePath, 'accepted validated online boundary');
+          return await _refineSafely(imagePath, online.detection,
+              preferIdCardBounds: card || preferIdCardBounds);
+        }
+        _log(imagePath, 'online candidate rejected by local geometry gates');
+      }
+    } catch (error) {
+      _log(imagePath, 'online unavailable; offline fallback: $error');
+    }
+    // First ask the on-device segmentation model where the document is
+    // (the approach modern scanner apps use). It answers only when it sees
+    // one clear, four-sided object; otherwise the rectangle detectors below
+    // run exactly as before. ID Card mode keeps its dedicated card logic.
+    SalientResult? salient;
+    if (!preferIdCardBounds && galleryDetectors) {
+      salient = await SalientDocumentDetector.detectFile(imagePath);
+      if (salient != null && salient.edgesConfirmed) {
+        _log(imagePath, 'accepted segmentation-model outline (edges confirmed)');
+        return salient.detection;
+      }
+    }
+    // Card camera (General / ID / Driver licence / Bank card): the
+    // segmentation model sees one object lying on cloth, a sheet or a desk
+    // far more reliably than the rectangle detectors. Accept it only when its
+    // four edges are confirmed and it is card-shaped.
+    if (preferIdCardBounds) {
+      salient = await SalientDocumentDetector.detectFile(imagePath);
+      if (salient != null && salient.edgesConfirmed &&
+          isCredibleStandaloneCard(salient.detection)) {
+        _log(imagePath, 'accepted segmentation-model card outline');
+        return _refineSafely(imagePath, salient.detection,
+            preferIdCardBounds: true);
+      }
+    }
+    var found = await _detectSafeStillOutlineCoarse(imagePath,
+        preferIdCardBounds: preferIdCardBounds,
+        galleryDetectors: galleryDetectors);
+    if (preferIdCardBounds && found == null) {
+      found = await _cardCameraFallback(imagePath, salient);
+      if (found != null) return found;
+    }
+    // A sheet photographed from close up runs off the frame; its visible
+    // outline (corners may sit on the frame edge) is what CamScanner crops.
+    final paper = !preferIdCardBounds && galleryDetectors
+        ? (await PaperRegionDetector.detectFile(imagePath))?.detection
+        : null;
+    if (found == null) {
+      if (paper != null) {
+        _log(imagePath, 'accepted visible paper region');
+        return paper;
+      }
+      // Nothing else found a document; the model's outline, even with one
+      // unconfirmed side, is closer than leaving the whole photo.
+      if (salient != null) {
+        _log(imagePath, 'using unconfirmed segmentation-model outline');
+        return salient.detection;
+      }
+      return null;
+    }
+    if (paper != null && paperRegionBeats(paper, found)) {
+      // The rectangle detectors stopped at a table or a printed box inside
+      // the sheet; the paper itself is the page.
+      _log(imagePath, 'paper region encloses the detected box; using paper');
+      return paper;
+    }
+    // Every detector path (native OpenCV, native colour masks, offline Dart)
+    // tends to land a few percent inside the real paper edge. Snap the
+    // accepted outline onto the actual edge pixels; on any doubt this returns
+    // the unchanged detection.
+    return _refineSafely(imagePath, found,
+        preferIdCardBounds: preferIdCardBounds);
+  }
+
+  /// The dedicated card chain declined. Run the general page/object chain
+  /// and keep only a card-shaped answer, so a card on patterned cloth or a
+  /// printed sheet is still cropped at its own four corners.
+  static Future<ImageDetection?> _cardCameraFallback(
+      String imagePath, SalientResult? salient) async {
+    ImageDetection? general;
+    try {
+      general = await _detectSafeStillOutlineCoarse(imagePath,
+          preferIdCardBounds: false, galleryDetectors: false);
+    } catch (error) {
+      _log(imagePath, 'card fallback page chain failed: $error');
+    }
+    if (general != null && isCredibleStandaloneCard(general)) {
+      _log(imagePath, 'accepted card from the page chain');
+      return _refineSafely(imagePath, general, preferIdCardBounds: true);
+    }
+    final separated = await BackgroundContrastContour.detectFile(imagePath);
+    if (separated != null && _isCardShaped(separated, minArea: .04, maxAspect: 2.35)) {
+      _log(imagePath, 'accepted card separated from its background');
+      return _refineSafely(imagePath, separated, preferIdCardBounds: true);
+    }
+    if (salient != null && _isCardShaped(salient.detection, minArea: .04, maxAspect: 2.35)) {
+      _log(imagePath, 'accepted segmentation-model card (small)');
+      return _refineSafely(imagePath, salient.detection,
+          preferIdCardBounds: true);
+    }
+    // A business card held further away is small in the frame, and a tilted
+    // one looks longer than 2:1. The native card mask still found its four
+    // corners; accept them with the relaxed card-camera limits.
+    for (final idCard in const [true, false]) {
+      ImageDetection? native;
+      try {
+        native = await detect(imagePath, preferIdCardBounds: idCard);
+      } catch (error) {
+        _log(imagePath, 'card fallback native pass failed: $error');
+      }
+      if (native != null &&
+          _isCardShaped(native, minArea: .04, maxAspect: 2.35)) {
+        _log(imagePath, 'accepted small or tilted native card');
+        return _refineSafely(imagePath, native, preferIdCardBounds: true);
+      }
+    }
+    final paper = (await PaperRegionDetector.detectFile(imagePath))?.detection;
+    if (paper != null && isCredibleStandaloneCard(paper)) {
+      _log(imagePath, 'accepted card-shaped paper region');
+      return paper;
+    }
+    return null;
+  }
+
+  static bool _sameQuad(Quad a, Quad b) {
+    for (var i = 0; i < 4; i++) {
+      if ((a.points[i] - b.points[i]).distance > .02) return false;
+    }
+    return true;
+  }
+
+  /// True when [paper] is a clearly bigger sheet that contains [found].
+  @visibleForTesting
+  static bool paperRegionBeats(ImageDetection paper, ImageDetection found) {
+    final sheet = paper.quad;
+    final f = found.quad;
+    if (sheet == null || f == null) return false;
+    if (sheet.area < f.area * 1.2) return false;
+    // Only a big inner box (a table, a printed frame) is replaced; a card
+    // lying on a sheet of paper keeps its own, smaller outline.
+    if (f.area < .30 || sheet.area < .45) return false;
+    var inside = 0;
+    const n = 12;
+    for (var i = 0; i < n; i++) {
+      for (var j = 0; j < n; j++) {
+        final u = (i + .5) / n;
+        final v = (j + .5) / n;
+        final top = Offset.lerp(f.topLeft, f.topRight, u)!;
+        final bottom = Offset.lerp(f.bottomLeft, f.bottomRight, u)!;
+        if (sheet.contains(Offset.lerp(top, bottom, v)!)) inside++;
+      }
+    }
+    return inside / (n * n) >= .85;
+  }
+
+  static Future<ImageDetection?> _detectSafeStillOutlineCoarse(
+      String imagePath,
+      {bool preferIdCardBounds = false, bool galleryDetectors = true}) async {
+    ImageDetection? normal;
+    try {
+      normal = await detect(imagePath,
+          preferIdCardBounds: preferIdCardBounds);
+    } catch (error) {
+      _log(imagePath, 'native page detector failed: $error');
+    }
+    final normalIsSafe = normal != null &&
+        isReliableGalleryCrop(normal,
+            preferIdCardBounds: preferIdCardBounds) &&
+        (!preferIdCardBounds || isCredibleStandaloneCard(normal));
+
+    // Most well-framed A4 pages need just one pass. A compact/interior result
+    // or a dominant camera-frame rectangle merits an independent card pass.
+    final area = normal?.quad?.area ?? 0;
+    // Even a 70%-frame 'page' can be the surrounding notebook. Run the card
+    // pass when its outline crowds three frame sides; the native chroma mask
+    // can then recover the much smaller gold/coloured ID inside it.
+    final normalQuad = normal?.quad;
+    final nativeLooksLikeWholePage = !preferIdCardBounds && normalIsSafe &&
+        area > .62 && normalQuad != null &&
+        !_nearFrameOnThreeSides(normalQuad);
+
+    ImageDetection? card;
+    if (!preferIdCardBounds && !nativeLooksLikeWholePage) {
+      try {
+        card = await detect(imagePath, preferIdCardBounds: true);
+      } catch (error) {
+        _log(imagePath, 'native card detector failed: $error');
+      }
+    }
+    if (card != null) {
+      if (normal == null && isCredibleStandaloneCard(card)) {
+        _log(imagePath, 'accepted native card with no page quad');
+        return card;
+      }
+      if (normal != null &&
+          (isCredibleOuterCardAlternative(normal, card) ||
+           isCredibleCardInsideBackground(normal, card))) {
+        _log(imagePath, 'accepted native outer card alternative');
+        return card;
+      }
+    }
+
+    // Independent on-device pixel segmentation. This is deliberately not a
+    // neural image generator: it never invents a face, text or ID number.
+    // It also operates when native OpenCV is missing or returns no quad.
+    final independent = await OfflineDocumentContour.detectDetailedFile(imagePath,
+        preferIdCardBounds: preferIdCardBounds);
+    final offline = independent?.detection;
+    final outside = offline?.quad;
+    if (independent != null && offline != null && outside != null) {
+      if (preferIdCardBounds) {
+        final credible = isCredibleStandaloneCard(offline);
+        if (credible && (!normalIsSafe ||
+            isCredibleOuterCardAlternative(normal, offline) ||
+            isCredibleCardInsideHolder(normal, offline,
+                borderEvidence: independent.borderEvidence))) {
+          _log(imagePath, 'accepted independent card outline');
+          return offline;
+        }
+      }
+      if (!preferIdCardBounds) {
+        final safePage = isReliableGalleryCrop(offline);
+        final safeCard = isCredibleStandaloneCard(offline);
+        if (isVerifiedWhiteCardOnDark(normal, independent)) {
+          _log(imagePath, 'accepted complete white card over dark background');
+          return offline;
+        }
+        if (normal == null && (safePage || safeCard)) {
+          _log(imagePath, 'accepted independent ${safeCard ? 'card' : 'page'} outline');
+          return offline;
+        }
+        // The page detector's own result was rejected (e.g. it returned the
+        // ruled sheet *around* a card, which looks like an inner printed box).
+        // A coloured card on a neutral background with strong evidence on all
+        // four sides is then far better than dropping to manual review. A
+        // smaller card can never "enclose" a rejected page quad, so the
+        // alternatives below cannot accept it.
+        final strongColoredCard = !normalIsSafe && safeCard &&
+            independent.colorOnNeutralBackground &&
+            independent.borderEvidence >= .56;
+        if (normal != null &&
+            (strongColoredCard ||
+             isCredibleOuterCardAlternative(normal, offline) ||
+             isCredibleCardInsideBackground(normal, offline) ||
+             (safeCard && isCredibleColoredCardOverPage(
+                 normal, independent)) ||
+             (safeCard && isCredibleCardInsideHolder(normal, offline,
+                 borderEvidence: independent.borderEvidence)) ||
+             (!normalIsSafe && safePage && normalQuad != null &&
+              outside.area >= normalQuad.area * 1.3 &&
+              normalQuad.points.every(outside.contains)))) {
+          _log(imagePath, 'accepted independent outer boundary');
+          return offline;
+        }
+      }
+    }
+    if (!normalIsSafe) {
+      final pageArea = normal?.quad?.area;
+      final cardArea = card?.quad?.area;
+      final offlineArea = offline?.quad?.area;
+      _log(imagePath, 'no reliable outside boundary '
+          '(page=${pageArea?.toStringAsFixed(3) ?? 'none'}, '
+          'card=${cardArea?.toStringAsFixed(3) ?? 'none'}, '
+          'offline=${offlineArea?.toStringAsFixed(3) ?? 'none'})');
+    }
+    if (normalIsSafe) return normal;
+    // A small business card: the page pass and the dedicated card pass both
+    // landed on the same small card-shaped quad. Two independent detectors
+    // agreeing is strong evidence it is the object, not a printed box.
+    final cardQuad = card?.quad;
+    if (!preferIdCardBounds && normalQuad != null && cardQuad != null &&
+        _sameQuad(normalQuad, cardQuad) &&
+        _isCardShaped(card!, minArea: .04, maxAspect: 2.35)) {
+      _log(imagePath, 'accepted small card found by both native passes');
+      return card;
+    }
+    // Every rectangle-based path declined. A small card or photo lying on a
+    // table or cloth is exactly what those size gates refuse, so finally ask
+    // whether one object clearly stands apart from the surface it lies on.
+    // ID Card mode keeps its own dedicated card logic.
+    if (!preferIdCardBounds && galleryDetectors) {
+      final separated = await BackgroundContrastContour.detectFile(imagePath);
+      if (separated != null) {
+        _log(imagePath, 'accepted object separated from its background');
+        return separated;
+      }
+    }
+    return null;
+  }
+
+  /// Run at most two still-image scans concurrently. The previous serial
+  /// loop made large gallery selections wait for every decode and warp.
+  /// This fixed-size pool protects memory and preserves the original order.
+  static Future<AutoCropBatch> autoCropFiles(List<String> images,
+      {bool preferIdCardBounds = false,
+       bool galleryDetectors = true,
+       void Function(int processed, int total)? onProgress}) async {
+    if (images.isEmpty) return const AutoCropBatch([], 0);
+    final output = List<String>.of(images);
+    final failedFlags = List<bool>.filled(images.length, false);
+    var nextIndex = 0;
+    var processed = 0;
+    var cropped = 0;
+    var thrownFailures = 0;
+
+    Future<void> work() async {
+      while (true) {
+        final index = nextIndex++;
+        if (index >= images.length) return;
+        final image = images[index];
+        try {
+          final detection = await detectSafeStillOutline(image,
+              preferIdCardBounds: preferIdCardBounds,
+              galleryDetectors: galleryDetectors);
+          if (detection == null) {
+            failedFlags[index] = true;
+          } else {
+            String croppedPath;
+            try {
+              croppedPath = await DoclensPlatform.instance.warpImage(
+                rawImagePath: image,
+                quad: detection.quadIn,
+                jpegQuality: 95,
+                enhancement: ImageEnhancement.none,
+                // Only the ID/Bank card crop needs text-direction correction.
+                // Rotate on-device if ML Kit is confident, never force 180.
+                autoOrientation: preferIdCardBounds
+                    ? AutoOrientation.auto : AutoOrientation.none,
+                // Camera stills (incl. ID Card mode) often include the
+                // card's cast shadow; imported photos keep their outline.
+                trimShadow: !galleryDetectors,
+              );
+            } catch (error) {
+              _log(image, 'native warp failed, trying Dart: $error');
+              final croppedBytes = await ImageProcessor.process(
+                await File(image).readAsBytes(),
+                crop: CropQuad(detection.quad!.points),
+              );
+              final file = File(p.join(Directory.systemTemp.path,
+                  'ds_offline_crop_${DateTime.now().microsecondsSinceEpoch}_$index.jpg'));
+              await file.writeAsBytes(croppedBytes, flush: true);
+              croppedPath = file.path;
+            }
+            output[index] = croppedPath;
+            cropped++;
+          }
+        } catch (error) {
+          _log(image, 'auto-crop skipped: $error');
+          output[index] = image;
+          failedFlags[index] = true;
+          thrownFailures++;
+        } finally {
+          processed++;
+          try {
+            onProgress?.call(processed, images.length);
+          } catch (error) {
+            _log(image, 'progress listener ignored: $error');
+          }
+        }
+      }
+    }
+
+    final workerCount = math.min(2, images.length);
+    await Future.wait(List.generate(workerCount, (_) => work()));
+    final failedIndexes = <int>[
+      for (var i = 0; i < failedFlags.length; i++)
+        if (failedFlags[i]) i,
+    ];
+    return AutoCropBatch(output, cropped,
+        failedIndexes: failedIndexes, failedCount: thrownFailures);
+  }
+}
+
+class AutoCropBatch {
+  const AutoCropBatch(this.paths, this.croppedCount,
+      {this.failedIndexes = const <int>[], this.failedCount = 0});
+
+  final List<String> paths;
+  final int croppedCount;
+  /// Indexes into [paths] that retained their uncropped source image.
+  final List<int> failedIndexes;
+  /// Actual processing exceptions, separately from uncertain/no-edge photos.
+  /// Retained from the supplied DocumentEdges implementation for callers that
+  /// need to distinguish a decode failure from an ambiguous document.
+  final int failedCount;
+
+  int get needsReview => paths.length - croppedCount;
+  int get failed => failedCount;
+  int get ambiguous => needsReview - failedCount;
+}

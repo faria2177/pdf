@@ -10,6 +10,7 @@ import '../widgets/dialogs.dart';
 
 import '../editor/pdf_editor_page.dart';
 import '../scan/id_card_page.dart';
+import '../scan/image_filters.dart';
 import '../scan/scan_review_page.dart';
 import '../scan/scan_service.dart';
 import '../services/thumbnail_service.dart';
@@ -22,6 +23,7 @@ import 'tools/pdf_to_images_page.dart';
 import 'tools/pdf_to_word_page.dart';
 import 'tools/resize_image_page.dart';
 import 'organize_page.dart';
+import 'settings_page.dart';
 import 'protect_page.dart';
 import 'redact_page.dart';
 import 'split_page.dart';
@@ -121,9 +123,11 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _scan() async {
-    final images = await ScanService.captureOrPick(context);
+    final images = await ScanService.scanDocuments(context);
     if (images.isEmpty || !mounted) return;
-    await Navigator.of(context).push(MaterialPageRoute(builder: (_) => ScanReviewPage(images: images)));
+    await Navigator.of(context).push(MaterialPageRoute(
+      builder: (_) => ScanReviewPage(images: images, initialFilter: ScanFilter.original),
+    ));
   }
 
   Future<void> _idCard() async {
@@ -276,18 +280,9 @@ class _HomePageState extends State<HomePage> {
         title: const Text('PDF Studio'),
         actions: [
           IconButton(
-            tooltip: 'About',
-            icon: const Icon(Icons.info_outline),
-            onPressed: () => showAboutDialog(
-              context: context,
-              applicationName: 'PDF Studio',
-              applicationVersion: '1.0',
-              children: const [
-                Text('A private, offline PDF reader and page organizer. '
-                    'Inspired by the feature set of the open-source PdfCraft project; '
-                    'rendering by PDFium through pdfrx. Nothing leaves your phone.'),
-              ],
-            ),
+            tooltip: 'Settings',
+            icon: const Icon(Icons.settings_outlined),
+            onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const SettingsPage())),
           ),
         ],
       ),
