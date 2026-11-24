@@ -6,6 +6,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../services/file_service.dart';
 import '../services/pdf_open.dart';
+import '../services/recent_store.dart';
 import '../utils/image_tools.dart';
 import '../widgets/dialogs.dart';
 import 'organize_page.dart';
@@ -221,6 +222,8 @@ class _ViewerPageState extends State<ViewerPage> {
     final png = await withProgress(context, 'Rendering page $_page…', () => renderPageToPng(page, dpi: 200));
     if (png == null || !mounted) return;
     final name = '${FileService.withoutExtension(widget.name)}_p$_page.png';
+    await RecentStore.instance.addBytes(png, name);
+    if (!mounted) return;
     final ok = await FileService.saveAs(png, name, mimeType: 'image/png');
     if (ok && mounted) toast(context, 'Saved $name');
   }
@@ -246,6 +249,8 @@ class _ViewerPageState extends State<ViewerPage> {
         : await File(widget.path).readAsBytes();
     if (bytes == null || !mounted) return;
     final name = removePassword ? '${FileService.withoutExtension(widget.name)}_unlocked.pdf' : widget.name;
+    if (removePassword) await RecentStore.instance.addBytes(bytes, name);
+    if (!mounted) return;
     final ok = await FileService.saveAs(bytes, name);
     if (ok && mounted) toast(context, 'Saved $name');
   }

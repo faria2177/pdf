@@ -4,10 +4,12 @@ import 'package:material_ui/material_ui.dart';
 
 import '../pages/home_page.dart';
 import '../services/file_service.dart';
+import '../services/recent_store.dart';
 import 'dialogs.dart';
 
-/// Share / Open / Save row for a finished PDF.
-class ResultActions extends StatelessWidget {
+/// Share / Open / Save row for a finished file. The file is also added to Recent
+/// as soon as it is shown.
+class ResultActions extends StatefulWidget {
   const ResultActions({
     required this.bytes,
     required this.fileName,
@@ -20,6 +22,30 @@ class ResultActions extends StatelessWidget {
   final String fileName;
   final bool allowOpen;
   final String mimeType;
+
+  @override
+  State<ResultActions> createState() => _ResultActionsState();
+}
+
+class _ResultActionsState extends State<ResultActions> {
+  @override
+  void initState() {
+    super.initState();
+    RecentStore.instance.addBytes(widget.bytes, widget.fileName);
+  }
+
+  @override
+  void didUpdateWidget(covariant ResultActions old) {
+    super.didUpdateWidget(old);
+    if (!identical(old.bytes, widget.bytes) || old.fileName != widget.fileName) {
+      RecentStore.instance.addBytes(widget.bytes, widget.fileName);
+    }
+  }
+
+  Uint8List get bytes => widget.bytes;
+  String get fileName => widget.fileName;
+  String get mimeType => widget.mimeType;
+  bool get allowOpen => widget.allowOpen;
 
   @override
   Widget build(BuildContext context) {
@@ -37,8 +63,8 @@ class ResultActions extends StatelessWidget {
           Expanded(
             child: OutlinedButton.icon(
               onPressed: () async {
-                final path = await FileService.storeInLibrary(bytes, fileName);
-                if (context.mounted) await openPdfInViewer(context, path, name: fileName);
+                final r = await RecentStore.instance.addBytes(bytes, fileName);
+                if (context.mounted) await openPdfInViewer(context, r.path, name: r.name);
               },
               icon: const Icon(Icons.visibility_outlined),
               label: const Text('Open'),

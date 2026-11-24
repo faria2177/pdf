@@ -6,6 +6,7 @@ import 'package:pdfrx/pdfrx.dart';
 
 import '../services/file_service.dart';
 import '../services/pdf_open.dart';
+import '../services/recent_store.dart';
 import '../utils/page_ranges.dart';
 import '../widgets/dialogs.dart';
 import 'home_page.dart';
@@ -122,14 +123,18 @@ class _SplitPageState extends State<SplitPage> {
     if (_plan.isEmpty || _problem != null) return;
     final files = await withProgress(context, 'Creating ${_plan.length} file(s)…', _build);
     if (files == null || files.isEmpty || !mounted) return;
+    for (final (bytes, name) in files) {
+      await RecentStore.instance.addBytes(bytes, name);
+    }
+    if (!mounted) return;
 
     if (how == 'share') {
       await FileService.shareBytes(files);
       return;
     }
     if (how == 'open' && files.length == 1) {
-      final path = await FileService.storeInLibrary(files.first.$1, files.first.$2);
-      if (mounted) await openPdfInViewer(context, path, name: files.first.$2);
+      final r = await RecentStore.instance.addBytes(files.first.$1, files.first.$2);
+      if (mounted) await openPdfInViewer(context, r.path, name: r.name);
       return;
     }
     if (files.length == 1) {

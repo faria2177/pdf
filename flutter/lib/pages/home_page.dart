@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:flutter/services.dart';
 import 'package:material_ui/material_ui.dart';
 
 import '../services/file_service.dart';
@@ -11,6 +12,7 @@ import 'package:google_mlkit_document_scanner/google_mlkit_document_scanner.dart
 import '../editor/pdf_editor_page.dart';
 import '../services/thumbnail_service.dart';
 import 'compress_page.dart';
+import 'image_viewer_page.dart';
 import 'tools/extract_text_page.dart';
 import 'tools/ocr_page.dart';
 import 'tools/pdf_to_excel_page.dart';
@@ -253,6 +255,29 @@ class _HomePageState extends State<HomePage> {
 
   @override
   Widget build(BuildContext context) {
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) async {
+        if (didPop) return;
+        final exit = await showDialog<bool>(
+          context: context,
+          builder: (d) => AlertDialog(
+            icon: const Icon(Icons.exit_to_app),
+            title: const Text('Exit PDF Studio?'),
+            content: const Text('Your files stay in Recent.'),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(d, false), child: const Text('Cancel')),
+              FilledButton(onPressed: () => Navigator.pop(d, true), child: const Text('Exit')),
+            ],
+          ),
+        );
+        if (exit == true) await SystemNavigator.pop();
+      },
+      child: _buildHome(context),
+    );
+  }
+
+  Widget _buildHome(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final recent = RecentStore.instance.items;
     final tools = <_Tool>[
@@ -371,10 +396,10 @@ class _HomePageState extends State<HomePage> {
                 final r = recent[i];
                 return ListTile(
                   contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
-                  leading: _RecentThumb(key: ValueKey(r.path), path: r.path),
+                  leading: _RecentThumb(key: ValueKey(r.path), item: r),
                   title: Text(r.name, maxLines: 1, overflow: TextOverflow.ellipsis),
-                  subtitle: Text('${_size(r.path)}${_ago(r.openedAt)}'),
-                  onTap: () => openPdfInViewer(context, r.path, name: r.name),
+                  subtitle: Text('${r.ext.toUpperCase()} · ${_size(r.path)}${_ago(r.openedAt)}'),
+                  onTap: () => _openRecent(r),
                   onLongPress: () => _recentActions(r),
                   trailing: IconButton(
                     tooltip: 'Options',
@@ -424,6 +449,14 @@ class _HomePageState extends State<HomePage> {
               },
             ),
             ListTile(
+              leading: const Icon(Icons.open_in_new),
+              title: const Text('Open with another app'),
+              onTap: () {
+                Navigator.pop(sheet);
+                _openExternally(r);
+              },
+            ),
+            ListTile(
               leading: const Icon(Icons.share_outlined),
               title: const Text('Share'),
               onTap: () {
@@ -459,6 +492,32 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  /// PDFs open in the viewer, images in the image viewer, everything else
+  /// (Word, Excel, text, ZIP) in another installed app.
+  Future<void> _openRecent(RecentFile r) async {
+    if (!File(r.path).existsSync()) {
+      toast(context, 'File not found');
+      await RecentStore.instance.remove(r, deleteFile: false);
+      return;
+    }
+    if (r.isPdf) {
+      await openPdfInViewer(context, r.path, name: r.name);
+    } else if (r.isImage) {
+      await RecentStore.instance.add(r.path, r.name);
+      if (!mounted) return;
+      await Navigator.of(context).push(MaterialPageRoute(builder: (_) => ImageViewerPage(path: r.path, name: r.name)));
+    } else {
+      await _openExternally(r);
+    }
+  }
+
+  Future<void> _openExternally(RecentFile r) async {
+    final ok = await IntentService.openWith(r.path, r.name, FileService.mimeFor(r.name));
+    if (!ok && mounted) {
+      toast(context, 'No app found to open .${r.ext} files. Try Share instead.');
+    }
+  }
+
   Future<void> _shareRecent(RecentFile r) async {
     final f = File(r.path);
     if (!f.existsSync()) {
@@ -467,7 +526,7 @@ class _HomePageState extends State<HomePage> {
       return;
     }
     try {
-      await FileService.shareBytes([(await f.readAsBytes(), r.name)]);
+      await FileService.shareBytes([(await f.readAsBytes(), r.name)], mimeType: FileService.mimeFor(r.name));
     } catch (e) {
       if (mounted) toast(context, "Couldn't share: $e");
     }
@@ -540,21 +599,58 @@ class _ToolCard extends StatelessWidget {
   }
 }
 
-/// First-page preview for a Recent entry (cached PNG; lock icon for protected files).
+/// Preview for a Recent entry: first page for PDFs, the picture for images, a file badge otherwise.
 class _RecentThumb extends StatefulWidget {
-  const _RecentThumb({required this.path, super.key});
-  final String path;
+  const _RecentThumb({required this.item, super.key});
+  final RecentFile item;
 
   @override
   State<_RecentThumb> createState() => _RecentThumbState();
 }
 
 class _RecentThumbState extends State<_RecentThumb> {
-  late final Future<File?> _thumb = ThumbnailService.thumbnailFor(widget.path);
+  late final Future<File?>? _thumb = widget.item.isPdf ? ThumbnailService.thumbnailFor(widget.item.path) : null;
+
+  Widget _badge(ColorScheme scheme) {
+    final (icon, color) = switch (widget.item.ext) {
+      'docx' || 'doc' => (Icons.description, const Color(0xFF2B579A)),
+      'xlsx' || 'xls' => (Icons.table_chart, const Color(0xFF217346)),
+      'txt' => (Icons.notes, const Color(0xFF616161)),
+      'zip' => (Icons.folder_zip, const Color(0xFFF57C00)),
+      _ => (Icons.insert_drive_file, scheme.outline),
+    };
+    return Column(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        Icon(icon, color: color, size: 24),
+        Text(widget.item.ext.toUpperCase(),
+            style: TextStyle(fontSize: 9, fontWeight: FontWeight.bold, color: color)),
+      ],
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    final Widget child;
+    if (widget.item.isImage) {
+      child = Image.file(File(widget.item.path), fit: BoxFit.cover, cacheWidth: 120, gaplessPlayback: true,
+          errorBuilder: (_, _, _) => Icon(Icons.broken_image_outlined, color: scheme.outline));
+    } else if (widget.item.isPdf) {
+      child = FutureBuilder<File?>(
+        future: _thumb,
+        builder: (context, snap) {
+          if (snap.connectionState != ConnectionState.done) {
+            return const Center(child: SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 1.5)));
+          }
+          final f = snap.data;
+          if (f == null) return Icon(Icons.lock_outline, size: 20, color: scheme.outline);
+          return Image.file(f, fit: BoxFit.cover, alignment: Alignment.topCenter, gaplessPlayback: true);
+        },
+      );
+    } else {
+      child = _badge(scheme);
+    }
     return Container(
       width: 44,
       height: 58,
@@ -565,17 +661,7 @@ class _RecentThumbState extends State<_RecentThumb> {
         boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 2, offset: Offset(0, 1))],
       ),
       clipBehavior: Clip.antiAlias,
-      child: FutureBuilder<File?>(
-        future: _thumb,
-        builder: (context, snap) {
-          if (snap.connectionState != ConnectionState.done) {
-            return const Center(child: SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 1.5)));
-          }
-          final f = snap.data;
-          if (f == null) return Icon(Icons.lock_outline, size: 20, color: scheme.outline);
-          return Image.file(f, fit: BoxFit.cover, alignment: Alignment.topCenter, gaplessPlayback: true);
-        },
-      ),
+      child: child,
     );
   }
 }

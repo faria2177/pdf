@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:material_ui/material_ui.dart';
 
 import '../../services/file_service.dart';
+import '../../services/recent_store.dart';
 import '../../services/ocr_service.dart';
 import '../../utils/office_writers.dart';
 import '../../utils/text_layout.dart';
@@ -260,6 +261,7 @@ class _ExtractTextPageState extends PdfToolState<ExtractTextPage> {
                               }
                             }
                             final bytes = b.build(title: _base);
+                            await RecentStore.instance.addBytes(bytes, '$_base.docx');
                             final ok = await FileService.saveAs(bytes, '$_base.docx', mimeType: docxMime);
                             if (ok && context.mounted) toast(context, 'Saved $_base.docx');
                           },

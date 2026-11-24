@@ -97,5 +97,18 @@ class FileService {
     await SharePlus.instance.share(ShareParams(files: xfiles));
   }
 
+  static String mimeFor(String name) => switch (p.extension(name).toLowerCase()) {
+        '.pdf' => 'application/pdf',
+        '.jpg' || '.jpeg' => 'image/jpeg',
+        '.png' => 'image/png',
+        '.webp' => 'image/webp',
+        '.gif' => 'image/gif',
+        '.docx' => 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        '.xlsx' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        '.txt' => 'text/plain',
+        '.zip' => 'application/zip',
+        _ => 'application/octet-stream',
+      };
+
   static String withoutExtension(String name) => p.basenameWithoutExtension(name);
 }

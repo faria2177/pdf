@@ -9,6 +9,15 @@ class IntentService {
 
   static const _channel = MethodChannel('pdf_studio/intent');
 
+  /// Opens [path] in another installed app. Returns false if nothing can open it.
+  static Future<bool> openWith(String path, String name, String mime) async {
+    try {
+      return await _channel.invokeMethod<bool>('openWith', {'path': path, 'name': name, 'mime': mime}) ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
   void Function(String path)? _onFile;
   String? _pending;
 

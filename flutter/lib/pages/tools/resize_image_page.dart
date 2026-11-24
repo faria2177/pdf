@@ -8,6 +8,7 @@ import 'package:jpeg_encode/jpeg_encode.dart';
 import 'package:material_ui/material_ui.dart';
 
 import '../../services/file_service.dart';
+import '../../services/recent_store.dart';
 import '../../widgets/dialogs.dart';
 import '../../widgets/result_actions.dart';
 import '../../widgets/tool_widgets.dart';
@@ -214,7 +215,11 @@ class _ResizeImagePageState extends State<ResizeImagePage> {
       }
       return res;
     });
-    if (out != null && mounted) setState(() => _result = out);
+    if (out == null || !mounted) return;
+    for (final o in out) {
+      await RecentStore.instance.addBytes(o.bytes, o.name);
+    }
+    if (mounted) setState(() => _result = out);
   }
 
   Future<void> _saveZip() async {

@@ -7,6 +7,7 @@ import 'package:pdfrx/pdfrx.dart';
 
 import '../services/file_service.dart';
 import '../services/pdf_open.dart';
+import '../services/recent_store.dart';
 import '../utils/image_tools.dart';
 import '../widgets/dialogs.dart';
 import 'home_page.dart';
@@ -349,6 +350,8 @@ class _OrganizePageState extends State<OrganizePage> {
   Future<void> _output(String how) async {
     final bytes = await withProgress(context, 'Building PDF…', _encode);
     if (bytes == null || !mounted) return;
+    final recent = await RecentStore.instance.addBytes(bytes, _outName);
+    if (!mounted) return;
     switch (how) {
       case 'save':
         final ok = await FileService.saveAs(bytes, _outName);
@@ -359,9 +362,8 @@ class _OrganizePageState extends State<OrganizePage> {
       case 'share':
         await FileService.shareBytes([(bytes, _outName)]);
       case 'open':
-        final path = await FileService.storeInLibrary(bytes, _outName);
         _savedSinceEdit = true;
-        if (mounted) await openPdfInViewer(context, path, name: _outName);
+        if (mounted) await openPdfInViewer(context, recent.path, name: recent.name);
     }
   }
 

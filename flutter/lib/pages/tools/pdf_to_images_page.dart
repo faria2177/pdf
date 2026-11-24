@@ -7,6 +7,7 @@ import 'package:material_ui/material_ui.dart';
 import 'package:pdfrx/pdfrx.dart';
 
 import '../../services/file_service.dart';
+import '../../services/recent_store.dart';
 import '../../widgets/dialogs.dart';
 import '../../widgets/result_actions.dart';
 import '../../widgets/tool_widgets.dart';
@@ -103,7 +104,11 @@ class _PdfToImagesPageState extends PdfToolState<PdfToImagesPage> {
       }
       return files;
     });
-    if (out != null && mounted) setState(() => _result = out);
+    if (out == null || !mounted) return;
+    for (final (bytes, name) in out) {
+      await RecentStore.instance.addBytes(bytes, name);
+    }
+    if (mounted) setState(() => _result = out);
   }
 
   Future<void> _saveZip() async {

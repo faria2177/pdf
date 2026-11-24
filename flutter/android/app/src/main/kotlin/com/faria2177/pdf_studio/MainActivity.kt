@@ -4,6 +4,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.provider.OpenableColumns
+import androidx.core.content.FileProvider
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -41,6 +42,12 @@ class MainActivity : FlutterActivity() {
                             runOnUiThread { result.success(path) }
                         }
                     }
+                }
+                "openWith" -> {
+                    val path = call.argument<String>("path")
+                    val mime = call.argument<String>("mime") ?: "*/*"
+                    val name = call.argument<String>("name") ?: File(path ?: "file").name
+                    result.success(path != null && openWith(File(path), sanitize(name), mime))
                 }
                 else -> result.notImplemented()
             }
@@ -89,6 +96,25 @@ class MainActivity : FlutterActivity() {
             out.absolutePath
         } catch (e: Exception) {
             null
+        }
+    }
+
+    /** Opens a file of ours in another app (Word, Excel, gallery…) through a FileProvider. */
+    private fun openWith(src: File, name: String, mime: String): Boolean {
+        return try {
+            val dir = File(cacheDir, "shared").apply { mkdirs() }
+            dir.listFiles()?.forEach { if (it.name != name) it.delete() }
+            val out = File(dir, name)
+            src.inputStream().use { input -> out.outputStream().use { input.copyTo(it) } }
+            val uri = FileProvider.getUriForFile(this, "$packageName.files", out)
+            val view = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, mime)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            startActivity(Intent.createChooser(view, "Open with").addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION))
+            true
+        } catch (e: Exception) {
+            false
         }
     }
 

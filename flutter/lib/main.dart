@@ -48,6 +48,12 @@ class _PdfStudioAppState extends State<PdfStudioApp> {
         useMaterial3: true,
         colorScheme: ColorScheme.fromSeed(seedColor: seed, brightness: Brightness.dark),
       ),
+      // Android 15+ draws apps edge-to-edge. Keep every screen, bottom sheet and dialog
+      // above the system navigation bar (and clear of side cut-outs in landscape).
+      builder: (context, child) => ColoredBox(
+        color: Theme.of(context).colorScheme.surfaceContainer,
+        child: SafeArea(top: false, child: child ?? const SizedBox.shrink()),
+      ),
       home: const HomePage(),
     );
   }
