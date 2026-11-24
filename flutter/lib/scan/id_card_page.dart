@@ -155,7 +155,7 @@ class _IdCardPageState extends State<IdCardPage> {
         s
           ..crop = Rect.fromLTRB(1 - c.bottom, c.left, 1 - c.top, c.right)
           ..turns = (s.turns + 1) % 4
-          ..version++;
+          ..version += 1;
         _refresh();
       case 'remove':
         ScanService.deleteQuietly([s.path]);

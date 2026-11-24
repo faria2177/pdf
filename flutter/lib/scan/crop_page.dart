@@ -154,7 +154,7 @@ class _CropPageState extends State<CropPage> {
               widget.page
                 ..crop = _crop
                 ..turns = _turns
-                ..version++;
+                ..version += 1;
               Navigator.pop(context, true);
             },
             child: const Text('Done', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
