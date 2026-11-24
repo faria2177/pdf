@@ -106,6 +106,20 @@ def scene_page(W, H):
     return np.clip(img, 0, 255).astype(np.uint8), quad, 297 / 210
 
 
+def scene_guide(W, H):
+    """Card held in the camera's guide frame, with a sheet of paper above it
+    and a dark notebook below — things a full-frame detector grabs first."""
+    img = background(W, H)
+    paper = [(W * .06, H * .02), (W * .94, H * .03), (W * .93, H * .30), (W * .05, H * .29)]
+    img = paste(img, page_texture(1240, 1754), paper)
+    book = np.full((600, 900, 3), (60, 45, 40), np.float32)
+    img = paste(img, book, [(W * .1, H * .74), (W * .95, H * .72), (W * .97, H * .99), (W * .12, H * 1.0)])
+    cw = W * .80; ch = cw * CARD[1] / CARD[0]
+    quad = rotated_rect(W * .5, H * .5, cw, ch, 2.0)
+    img = paste(img, card_texture(1712, 1080), quad)
+    return np.clip(img, 0, 255).astype(np.uint8), quad, CARD[0] / CARD[1]
+
+
 def encode(upright_bgr, exif6):
     """JPEG bytes. With exif6 the pixels are stored rotated 90° CCW and tagged
     orientation 6, exactly like a phone camera held in portrait."""
@@ -129,8 +143,11 @@ def main():
         ('card_sleeve_sideways_upright', (3000, 4000), 'sideways', False),
         ('card_landscape_exif6', (3000, 4000), 'flat', True),
         ('page_a4_exif6_12mp', (3000, 4000), 'page', True),
+        ('guide_card_with_clutter_exif6', (3000, 4000), 'guide', True),
     ]:
-        if kind == 'page':
+        if kind == 'guide':
+            img, quad, aspect = scene_guide(W, H)
+        elif kind == 'page':
             img, quad, aspect = scene_page(W, H)
         else:
             img, quad, aspect = scene_card(W, H, kind == 'sideways', tilt=3.0)

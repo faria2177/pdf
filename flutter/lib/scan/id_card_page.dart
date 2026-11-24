@@ -463,229 +463,283 @@ class _IdCardPageState extends State<IdCardPage> {
         }
       },
       child: Scaffold(
-        appBar: AppBar(title: const Text('ID Card')),
-        body: ListView(
-          padding: const EdgeInsets.all(16),
-          children: [
-            // Live page preview
-            AspectRatio(
-              aspectRatio: pw / ph,
-              child: Container(
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 8, offset: Offset(0, 2))],
-                  border: Border.all(color: scheme.outlineVariant),
-                ),
-                child: _preview == null
-                    ? Center(child: TextButton.icon(onPressed: _refresh, icon: const Icon(Icons.refresh), label: const Text('Preview')))
-                    : LayoutBuilder(
-                        builder: (context, box) => GestureDetector(
-                          behavior: HitTestBehavior.opaque,
-                          onTapUp: (d) => _tapPreview(d.localPosition, box.biggest),
-                          child: RawImage(image: _preview, fit: BoxFit.contain),
-                        ),
-                      ),
-              ),
-            ),
-            const SizedBox(height: 8),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Icon(Icons.touch_app_outlined, size: 16, color: scheme.onSurfaceVariant),
-                const SizedBox(width: 6),
-                Flexible(
-                  child: Text(
-                    _front == null ? 'Tap the card to scan it' : 'Tap a card to retake, crop, rotate or remove it',
-                    style: TextStyle(fontSize: 12.5, color: scheme.onSurfaceVariant),
-                  ),
-                ),
-              ],
-            ),
-            const SectionTitle('Card type'),
-            Wrap(
-              spacing: 8,
-              runSpacing: 4,
-              children: [
-                for (final t in CardType.values)
-                  ChoiceChip(
-                    label: Text(t.label),
-                    selected: _type == t,
-                    onSelected: (_) => _set(() => _type = t),
-                  ),
-              ],
-            ),
-            if (_type == CardType.custom) ...[
-              const SizedBox(height: 10),
-              Row(
-                children: [
-                  Expanded(
-                    child: TextFormField(
-                      initialValue: _customW.toString(),
-                      keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                      decoration: const InputDecoration(labelText: 'Width', suffixText: 'mm', border: OutlineInputBorder(), isDense: true),
-                      onChanged: (v) => _set(() => _customW = (double.tryParse(v) ?? _customW).clamp(20.0, 200.0)),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: TextFormField(
-                      initialValue: _customH.toString(),
-                      keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                      decoration: const InputDecoration(labelText: 'Height', suffixText: 'mm', border: OutlineInputBorder(), isDense: true),
-                      onChanged: (v) => _set(() => _customH = (double.tryParse(v) ?? _customH).clamp(20.0, 200.0)),
-                    ),
-                  ),
-                ],
-              ),
-            ],
-            if (_twoSided) ...[
-              const SectionTitle('Layout'),
-              SegmentedButton<CardLayout>(
-                segments: const [
-                  ButtonSegment(value: CardLayout.stacked, label: Text('Top & bottom'), icon: Icon(Icons.view_agenda_outlined)),
-                  ButtonSegment(value: CardLayout.sideBySide, label: Text('Side by side'), icon: Icon(Icons.view_column_outlined)),
-                ],
-                selected: {_layout},
-                onSelectionChanged: (s) => _set(() => _layout = s.first),
-              ),
-            ],
-            const SectionTitle('Filter'),
-            Wrap(
-              spacing: 8,
-              runSpacing: 4,
-              children: [
-                for (final f in const [ScanFilter.original, ScanFilter.enhance, ScanFilter.magic, ScanFilter.gray, ScanFilter.bw])
-                  ChoiceChip(label: Text(f.label), selected: _filter == f, onSelected: (_) => _set(() => _filter = f)),
-              ],
-            ),
-            const SectionTitle('Page'),
-            Row(
-              children: [
-                for (final p in CardPaper.values) ...[
-                  ChoiceChip(label: Text(p.label), selected: _paper == p, onSelected: (_) => _set(() => _paper = p)),
-                  const SizedBox(width: 8),
-                ],
-              ],
-            ),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              title: const Text('Actual size'),
-              subtitle: Text(_realSize
-                  ? 'Prints at the real card size (${(_cardW / _mmToPt).toStringAsFixed(1)} × ${(_cardH / _mmToPt).toStringAsFixed(1)} mm)'
-                  : 'Enlarged to fill the page width — easier to read'),
-              value: _realSize,
-              onChanged: (v) => _set(() => _realSize = v),
-            ),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              title: const Text('Rounded corners'),
-              value: _rounded,
-              onChanged: (v) => _set(() => _rounded = v),
-            ),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              title: const Text('Cut lines'),
-              subtitle: const Text('Dashed outline to cut along'),
-              value: _cutLines,
-              onChanged: (v) => _set(() => _cutLines = v),
-            ),
-            if (_twoSided)
-              SwitchListTile(
-                contentPadding: EdgeInsets.zero,
-                title: const Text('Front / Back labels'),
-                value: _labels,
-                onChanged: (v) => _set(() => _labels = v),
-              ),
-            const SectionTitle('Watermark'),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              title: const Text('Add watermark'),
-              subtitle: const Text('Protects your copy from misuse'),
-              value: _watermark,
-              onChanged: (v) => _set(() => _watermark = v),
-            ),
-            if (_watermark) ...[
-              TextField(
-                controller: _wmText,
-                decoration: const InputDecoration(labelText: 'Watermark text', border: OutlineInputBorder(), isDense: true),
-                onChanged: (_) => _refresh(),
-              ),
-              const SizedBox(height: 8),
-              Wrap(
-                spacing: 6,
-                children: [
-                  for (final t in const ['For verification only', 'Copy', 'Only for bank use', 'শুধুমাত্র যাচাইয়ের জন্য'])
-                    ActionChip(
-                      label: Text(t, style: const TextStyle(fontSize: 12)),
-                      onPressed: () {
-                        _wmText.text = t;
-                        _refresh();
-                      },
-                    ),
-                ],
-              ),
-              const SizedBox(height: 8),
-              Row(
-                children: [
-                  for (final c in const [Color(0xFFD32F2F), Color(0xFF1565C0), Color(0xFF424242), Color(0xFF2E7D32)])
-                    GestureDetector(
-                      onTap: () => _set(() => _wmColor = c),
-                      child: Container(
-                        margin: const EdgeInsets.only(right: 10),
-                        width: 28,
-                        height: 28,
-                        decoration: BoxDecoration(
-                          color: c,
-                          shape: BoxShape.circle,
-                          border: Border.all(color: c == _wmColor ? scheme.primary : Colors.transparent, width: 3),
-                        ),
-                      ),
-                    ),
-                  Expanded(
-                    child: Slider(
-                      value: _wmOpacity,
-                      min: 0.15,
-                      max: 0.8,
-                      onChanged: (v) => setState(() => _wmOpacity = v),
-                      onChangeEnd: (_) => _refresh(),
-                    ),
-                  ),
-                ],
-              ),
-            ],
-            const SizedBox(height: 20),
-            Row(
-              children: [
-                Expanded(
-                  child: OutlinedButton.icon(
-                    onPressed: _front == null ? null : () => _export('share'),
-                    icon: const Icon(Icons.share),
-                    label: const Text('Share'),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: OutlinedButton.icon(
-                    onPressed: _front == null ? null : () => _export('jpg'),
-                    icon: const Icon(Icons.image_outlined),
-                    label: const Text('JPG'),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  flex: 2,
-                  child: FilledButton.icon(
-                    onPressed: _front == null ? () => _capture(true) : () => _export('pdf'),
-                    icon: Icon(_front == null ? Icons.document_scanner : Icons.picture_as_pdf),
-                    label: Text(_front == null ? 'Scan front' : 'Save PDF'),
-                  ),
-                ),
-              ],
+        appBar: AppBar(
+          title: const Text('ID Card'),
+          actions: [
+            IconButton(
+              tooltip: 'Card type, layout, filter, page & watermark',
+              icon: const Icon(Icons.settings),
+              onPressed: _openSettings,
             ),
           ],
         ),
+        body: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+          child: Column(
+            children: [
+              // Live page preview
+              Expanded(
+                child: Center(
+                  child: AspectRatio(
+                    aspectRatio: pw / ph,
+                    child: Container(
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 8, offset: Offset(0, 2))],
+                        border: Border.all(color: scheme.outlineVariant),
+                      ),
+                      child: _preview == null
+                          ? Center(child: TextButton.icon(onPressed: _refresh, icon: const Icon(Icons.refresh), label: const Text('Preview')))
+                          : LayoutBuilder(
+                              builder: (context, box) => GestureDetector(
+                                behavior: HitTestBehavior.opaque,
+                                onTapUp: (d) => _tapPreview(d.localPosition, box.biggest),
+                                child: RawImage(image: _preview, fit: BoxFit.contain),
+                              ),
+                            ),
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 8),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(Icons.touch_app_outlined, size: 16, color: scheme.onSurfaceVariant),
+                  const SizedBox(width: 6),
+                  Flexible(
+                    child: Text(
+                      _front == null ? 'Tap the card to scan it' : 'Tap a card to retake, crop, rotate or remove it',
+                      style: TextStyle(fontSize: 12.5, color: scheme.onSurfaceVariant),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: _front == null ? null : () => _export('share'),
+                      icon: const Icon(Icons.share),
+                      label: const Text('Share'),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: _front == null ? null : () => _export('jpg'),
+                      icon: const Icon(Icons.image_outlined),
+                      label: const Text('JPG'),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    flex: 2,
+                    child: FilledButton.icon(
+                      onPressed: _front == null ? () => _capture(true) : () => _export('pdf'),
+                      icon: Icon(_front == null ? Icons.document_scanner : Icons.picture_as_pdf),
+                      label: Text(_front == null ? 'Scan front' : 'Save PDF'),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
       ),
     );
+  }
+
+  /// Rebuilds the page (and the open settings sheet) after a change.
+  void _sset(StateSetter sheetSet, VoidCallback change, {bool refresh = true}) {
+    if (refresh) {
+      _set(change);
+    } else {
+      setState(change);
+    }
+    sheetSet(() {});
+  }
+
+  /// Card type, layout, filter, page and watermark live in a sheet so the
+  /// page preview gets the whole screen.
+  Future<void> _openSettings() async {
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      useSafeArea: true,
+      builder: (context) => DraggableScrollableSheet(
+        expand: false,
+        initialChildSize: .62,
+        minChildSize: .35,
+        maxChildSize: .95,
+        builder: (context, controller) => StatefulBuilder(
+          builder: (context, sheetSet) {
+            final scheme = Theme.of(context).colorScheme;
+            return ListView(
+              controller: controller,
+              padding: EdgeInsets.fromLTRB(20, 0, 20, 24 + MediaQuery.viewInsetsOf(context).bottom),
+              children: [
+                const SectionTitle('Card type'),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 4,
+                  children: [
+                    for (final t in CardType.values)
+                      ChoiceChip(
+                        label: Text(t.label),
+                        selected: _type == t,
+                        onSelected: (_) => _sset(sheetSet, () => _type = t),
+                      ),
+                  ],
+                ),
+                if (_type == CardType.custom) ...[
+                  const SizedBox(height: 10),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: TextFormField(
+                          initialValue: _customW.toString(),
+                          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                          decoration: const InputDecoration(labelText: 'Width', suffixText: 'mm', border: OutlineInputBorder(), isDense: true),
+                          onChanged: (v) => _sset(sheetSet, () => _customW = (double.tryParse(v) ?? _customW).clamp(20.0, 200.0)),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: TextFormField(
+                          initialValue: _customH.toString(),
+                          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                          decoration: const InputDecoration(labelText: 'Height', suffixText: 'mm', border: OutlineInputBorder(), isDense: true),
+                          onChanged: (v) => _sset(sheetSet, () => _customH = (double.tryParse(v) ?? _customH).clamp(20.0, 200.0)),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+                if (_twoSided) ...[
+                  const SectionTitle('Layout'),
+                  SegmentedButton<CardLayout>(
+                    segments: const [
+                      ButtonSegment(value: CardLayout.stacked, label: Text('Top & bottom'), icon: Icon(Icons.view_agenda_outlined)),
+                      ButtonSegment(value: CardLayout.sideBySide, label: Text('Side by side'), icon: Icon(Icons.view_column_outlined)),
+                    ],
+                    selected: {_layout},
+                    onSelectionChanged: (s) => _sset(sheetSet, () => _layout = s.first),
+                  ),
+                ],
+                const SectionTitle('Filter'),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 4,
+                  children: [
+                    for (final f in const [ScanFilter.original, ScanFilter.enhance, ScanFilter.magic, ScanFilter.gray, ScanFilter.bw])
+                      ChoiceChip(label: Text(f.label), selected: _filter == f, onSelected: (_) => _sset(sheetSet, () => _filter = f)),
+                  ],
+                ),
+                const SectionTitle('Page'),
+                Row(
+                  children: [
+                    for (final p in CardPaper.values) ...[
+                      ChoiceChip(label: Text(p.label), selected: _paper == p, onSelected: (_) => _sset(sheetSet, () => _paper = p)),
+                      const SizedBox(width: 8),
+                    ],
+                  ],
+                ),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('Actual size'),
+                  subtitle: Text(_realSize
+                      ? 'Prints at the real card size (${(_cardW / _mmToPt).toStringAsFixed(1)} × ${(_cardH / _mmToPt).toStringAsFixed(1)} mm)'
+                      : 'Enlarged to fill the page width — easier to read'),
+                  value: _realSize,
+                  onChanged: (v) => _sset(sheetSet, () => _realSize = v),
+                ),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('Rounded corners'),
+                  value: _rounded,
+                  onChanged: (v) => _sset(sheetSet, () => _rounded = v),
+                ),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('Cut lines'),
+                  subtitle: const Text('Dashed outline to cut along'),
+                  value: _cutLines,
+                  onChanged: (v) => _sset(sheetSet, () => _cutLines = v),
+                ),
+                if (_twoSided)
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Front / Back labels'),
+                    value: _labels,
+                    onChanged: (v) => _sset(sheetSet, () => _labels = v),
+                  ),
+                const SectionTitle('Watermark'),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('Add watermark'),
+                  subtitle: const Text('Protects your copy from misuse'),
+                  value: _watermark,
+                  onChanged: (v) => _sset(sheetSet, () => _watermark = v),
+                ),
+                if (_watermark) ...[
+                  TextField(
+                    controller: _wmText,
+                    decoration: const InputDecoration(labelText: 'Watermark text', border: OutlineInputBorder(), isDense: true),
+                    onChanged: (_) => _sset(sheetSet, () {}),
+                  ),
+                  const SizedBox(height: 8),
+                  Wrap(
+                    spacing: 6,
+                    children: [
+                      for (final t in const ['For verification only', 'Copy', 'Only for bank use', 'শুধুমাত্র যাচাইয়ের জন্য'])
+                        ActionChip(
+                          label: Text(t, style: const TextStyle(fontSize: 12)),
+                          onPressed: () {
+                            _wmText.text = t;
+                            _sset(sheetSet, () {});
+                          },
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      for (final c in const [Color(0xFFD32F2F), Color(0xFF1565C0), Color(0xFF424242), Color(0xFF2E7D32)])
+                        GestureDetector(
+                          onTap: () => _sset(sheetSet, () => _wmColor = c),
+                          child: Container(
+                            margin: const EdgeInsets.only(right: 10),
+                            width: 28,
+                            height: 28,
+                            decoration: BoxDecoration(
+                              color: c,
+                              shape: BoxShape.circle,
+                              border: Border.all(color: c == _wmColor ? scheme.primary : Colors.transparent, width: 3),
+                            ),
+                          ),
+                        ),
+                      Expanded(
+                        child: Slider(
+                          value: _wmOpacity,
+                          min: 0.15,
+                          max: 0.8,
+                          onChanged: (v) => _sset(sheetSet, () => _wmOpacity = v, refresh: false),
+                          onChangeEnd: (_) => _refresh(),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ],
+            );
+          },
+        ),
+      ),
+    );
+    _refresh();
   }
 
   @override

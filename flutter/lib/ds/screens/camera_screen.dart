@@ -8,6 +8,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
+import '../services/card_guide_detector.dart';
 import '../services/camera_crop_review_decision.dart';
 import '../services/document_edges.dart';
 import '../services/gallery_import_flow.dart';
@@ -420,6 +421,17 @@ class _CameraScreenState extends State<CameraScreen> {
         rawPathsForOutputs.add(raw.isEmpty ? nativeCrop : raw);
         confirmedCrops.add(nativeCrop);
         continue;
+      }
+      // ID card camera: the card the user framed inside the guide box wins
+      // over whatever the full-frame live detector locked on to.
+      if (_detectCardBounds && raw.isNotEmpty) {
+        final guided = await CardGuideDetector.crop(raw);
+        if (guided != null) {
+          outputs.add(guided);
+          rawPathsForOutputs.add(raw);
+          confirmedCrops.add(guided);
+          continue;
+        }
       }
       // With no native crop and no green shutter outline, still-image
       // fallback remains available for legacy/system camera behavior.
