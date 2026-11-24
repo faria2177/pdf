@@ -110,7 +110,7 @@ def scene_guide(W, H):
     """Card held in the camera's guide frame, with a sheet of paper above it
     and a dark notebook below — things a full-frame detector grabs first."""
     img = background(W, H)
-    paper = [(W * .06, H * .02), (W * .94, H * .03), (W * .93, H * .30), (W * .05, H * .29)]
+    paper = [(W * .06, H * .02), (W * .94, H * .03), (W * .93, H * .235), (W * .05, H * .225)]
     img = paste(img, page_texture(1240, 1754), paper)
     book = np.full((600, 900, 3), (60, 45, 40), np.float32)
     img = paste(img, book, [(W * .1, H * .74), (W * .95, H * .72), (W * .97, H * .99), (W * .12, H * 1.0)])
