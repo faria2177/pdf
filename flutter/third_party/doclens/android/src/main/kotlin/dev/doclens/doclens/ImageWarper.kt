@@ -180,7 +180,7 @@ object ImageWarper {
             else -> return quad
         }
         if (kotlin.math.abs(sx - 1f) < 1e-4f && kotlin.math.abs(sy - 1f) < 1e-4f) return quad
-        fun s(p: android.graphics.PointF) = android.graphics.PointF(
+        fun s(p: PointF) = PointF(
             (p.x * sx).coerceIn(0f, w.toFloat()), (p.y * sy).coerceIn(0f, h.toFloat()))
         return Quad(s(quad.topLeft), s(quad.topRight), s(quad.bottomRight), s(quad.bottomLeft))
     }
