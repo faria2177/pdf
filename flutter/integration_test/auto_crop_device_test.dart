@@ -54,7 +54,7 @@ double quadIou(List<Offset> a, List<Offset> b) {
   return either == 0 ? 0 : both / either;
 }
 
-/// Share of a thin ring (1.5–3 % inside the edge) that is bright paper or
+/// Share of a thin ring (1–1.8 % inside the edge) that is bright paper or
 /// card. A crop that includes the grey table scores low.
 double brightRing(img.Image page) {
   var bright = 0;
@@ -68,7 +68,7 @@ double brightRing(img.Image page) {
 
   final w = page.width;
   final h = page.height;
-  for (final f in [.015, .03]) {
+  for (final f in [.01, .018]) {
     final dx = (w * f).round();
     final dy = (h * f).round();
     for (var x = dx; x < w - dx; x += 3) {

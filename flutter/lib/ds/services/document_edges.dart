@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 
 import 'background_contrast_contour.dart';
+import 'card_sleeve_refiner.dart';
 import 'image_processor.dart';
 import 'offline_document_contour.dart';
 import 'paper_region_detector.dart';
@@ -554,6 +555,31 @@ class DocumentEdges {
   /// background-contrast fallback, which were tuned for imported photos.
   /// Camera captures pass false and keep their proven detector chain.
   static Future<ImageDetection?> detectSafeStillOutline(String imagePath,
+      {bool preferIdCardBounds = false, bool galleryDetectors = true}) async {
+    final found = await _detectSafeStillOutline(imagePath,
+        preferIdCardBounds: preferIdCardBounds,
+        galleryDetectors: galleryDetectors);
+    // The outline can be a clear sleeve / holder (or a strip of table)
+    // around the card; look for the card's own edge inside it.
+    if (found != null && (preferIdCardBounds || _looksLikeCardOutline(found))) {
+      return CardSleeveRefiner.refine(imagePath, found);
+    }
+    return found;
+  }
+
+  static bool _looksLikeCardOutline(ImageDetection detection) {
+    final quad = detection.quad;
+    final size = detection.imageSize;
+    if (quad == null || size.width <= 0 || size.height <= 0) return false;
+    final pts = quad.scaleToSize(size).points;
+    final w = ((pts[1] - pts[0]).distance + (pts[2] - pts[3]).distance) / 2;
+    final h = ((pts[3] - pts[0]).distance + (pts[2] - pts[1]).distance) / 2;
+    if (w <= 0 || h <= 0) return false;
+    final ratio = math.max(w, h) / math.min(w, h);
+    return ratio >= 1.45 && ratio <= 2.0 && quad.area <= .86;
+  }
+
+  static Future<ImageDetection?> _detectSafeStillOutline(String imagePath,
       {bool preferIdCardBounds = false, bool galleryDetectors = true}) async {
     // Online First applies to still images only (not live CameraX frames).
     // Explicit opt-in and a private HTTPS endpoint are required; malformed or

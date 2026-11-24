@@ -114,22 +114,40 @@ class _IdCardPageState extends State<IdCardPage> {
       side: front ? (_twoSided ? 'Front' : _template.firstSide) : 'Back',
     );
     if (shots.isEmpty || !mounted) return;
+    // Cards sit landscape on the page; a card photographed sideways comes
+    // back portrait, so turn it instead of cropping half of it away.
+    final turns = [for (final s in shots) await _landscapeTurns(s)];
+    if (!mounted) return;
     setState(() {
       if (front) {
         if (_front != null) ScanService.deleteQuietly([_front!.path]);
-        _front = ScanImage(shots[0], filter: _filter);
+        _front = ScanImage(shots[0], filter: _filter, turns: turns[0]);
         if (both && shots.length > 1) {
-          _back = ScanImage(shots[1], filter: _filter);
+          _back = ScanImage(shots[1], filter: _filter, turns: turns[1]);
         }
       } else {
         if (_back != null) ScanService.deleteQuietly([_back!.path]);
-        _back = ScanImage(shots[0], filter: _filter);
+        _back = ScanImage(shots[0], filter: _filter, turns: turns[0]);
       }
     });
     _refresh();
     if (front && both && shots.length == 1 && _back == null && mounted) {
       final next = await confirm(context, 'Now scan the back side?', ok: 'Scan back', title: 'Front captured');
       if (next && mounted) await _capture(false);
+    }
+  }
+
+  /// 1 quarter turn when the cropped card is portrait but the card type is
+  /// landscape, else 0.
+  Future<int> _landscapeTurns(String path) async {
+    if (_cardH > _cardW) return 0;
+    try {
+      final im = await decodeImageFile(path, maxSide: 96);
+      final portrait = im.height > im.width * 1.15;
+      im.dispose();
+      return portrait ? 1 : 0;
+    } catch (_) {
+      return 0;
     }
   }
 
