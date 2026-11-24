@@ -7,9 +7,11 @@ import '../services/file_service.dart';
 import '../services/intent_service.dart';
 import '../services/recent_store.dart';
 import '../widgets/dialogs.dart';
-import 'package:google_mlkit_document_scanner/google_mlkit_document_scanner.dart';
 
 import '../editor/pdf_editor_page.dart';
+import '../scan/id_card_page.dart';
+import '../scan/scan_review_page.dart';
+import '../scan/scan_service.dart';
 import '../services/thumbnail_service.dart';
 import 'compress_page.dart';
 import 'image_viewer_page.dart';
@@ -119,42 +121,27 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _scan() async {
-    final scanner = DocumentScanner(
-      options: DocumentScannerOptions(
-        documentFormats: const {DocumentFormat.pdf},
-        mode: ScannerMode.full,
-        pageLimit: 100,
-        isGalleryImport: true,
-      ),
-    );
     try {
-      final result = await scanner.scanDocument();
-      final pdf = result.pdf;
-      if (pdf == null || !mounted) return;
-      final t = DateTime.now();
-      String two(int v) => v.toString().padLeft(2, '0');
-      final name = 'Scan ${t.year}-${two(t.month)}-${two(t.day)} ${two(t.hour)}.${two(t.minute)}.pdf';
-      final src = pdf.uri.startsWith('file://') ? Uri.parse(pdf.uri).toFilePath() : pdf.uri;
-      final path = await FileService.importPath(src, name);
-      await RecentStore.instance.add(path, name);
-      if (!mounted) return;
-      toast(context, 'Scanned ${pdf.pageCount} page${pdf.pageCount == 1 ? '' : 's'}');
-      await Navigator.of(context).push(MaterialPageRoute(builder: (_) => ViewerPage(path: path, name: name)));
+      final images = await ScanService.capture();
+      if (images.isEmpty || !mounted) return;
+      await Navigator.of(context).push(MaterialPageRoute(builder: (_) => ScanReviewPage(images: images)));
     } catch (e) {
-      final msg = '$e';
-      if (!mounted || msg.toLowerCase().contains('cancel')) return;
-      toast(context, "Scanner unavailable: ${msg.replaceFirst('Exception: ', '')}. It needs Google Play services.");
-    } finally {
-      scanner.close();
+      if (!mounted) return;
+      toast(context, "Scanner unavailable: ${'$e'.replaceFirst('Exception: ', '')}. It needs Google Play services.");
     }
+  }
+
+  Future<void> _idCard() async {
+    await Navigator.of(context).push(MaterialPageRoute(builder: (_) => const IdCardPage()));
   }
 
   void _more() {
     void go(Widget Function(String, String) page) => _pickThen(page);
     final sections = <(String, List<_Tool>)>[
       (
-        'Convert from PDF',
+        'Convert',
         [
+          _Tool(Icons.image_outlined, 'Images to PDF', '', _images),
           _Tool(Icons.description_outlined, 'PDF to Word', '', () => go((p, n) => PdfToWordPage(path: p, name: n))),
           _Tool(Icons.table_chart_outlined, 'PDF to Excel', '', () => go((p, n) => PdfToExcelPage(path: p, name: n))),
           _Tool(Icons.photo_library_outlined, 'PDF to JPG', '', () => go((p, n) => PdfToImagesPage(path: p, name: n))),
@@ -281,12 +268,12 @@ class _HomePageState extends State<HomePage> {
     final scheme = Theme.of(context).colorScheme;
     final recent = RecentStore.instance.items;
     final tools = <_Tool>[
-      _Tool(Icons.document_scanner, 'Scan', 'Camera to PDF, auto edges', _scan),
+      _Tool(Icons.document_scanner, 'Scan', 'Filters, crop, multi-page', _scan),
+      _Tool(Icons.badge_outlined, 'ID Card', 'Front & back on one page', _idCard),
       _Tool(Icons.dashboard_customize_outlined, 'Organize pages', 'Reorder, rotate, delete, insert', _organize),
       _Tool(Icons.merge_type, 'Combine files', 'Merge PDFs and images', _combine),
       _Tool(Icons.call_split, 'Split PDF', 'Every N pages or by ranges', () => _split(extract: false)),
-      _Tool(Icons.image_outlined, 'Images to PDF', 'Photos and scans to one PDF', _images),
-      _Tool(Icons.apps, 'More', 'Word, Excel, JPG, edit, sign, OCR…', _more),
+      _Tool(Icons.apps, 'More', 'Images to PDF, Word, Excel, sign…', _more),
     ];
 
     return Scaffold(
