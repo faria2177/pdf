@@ -19,7 +19,9 @@ int _clamp(num v) => v < 0 ? 0 : (v > 255 ? 255 : v.round());
 
 /// Box-blurred luminance (window ≈ 2r+1), computed on a downscaled copy to keep memory low
 /// and sampled back at full size with bilinear interpolation.
-Float32List _blurLum(Uint8List lum, int w, int h, int r) {
+Float32List _blurLum(Uint8List lum, int w, int h, int r) => _blur(lum, w, h, r);
+
+Float32List _blur(List<num> lum, int w, int h, int r) {
   final f = math.max(1, math.min(w, h) ~/ 500);
   final sw = (w + f - 1) ~/ f, sh = (h + f - 1) ~/ f;
   final small = Float64List(sw * sh);
@@ -127,16 +129,25 @@ void _stretch(Uint8List p, int lo, int hi, {double gamma = 1}) {
   }
 }
 
-/// Divides out uneven lighting/shadows using a large-window background estimate.
+/// Divides out uneven lighting/shadows. The paper colour is estimated only from pixels
+/// that look like paper (brighter than their surroundings), so text leaves no halo.
 void _flattenLighting(Uint8List p, int w, int h) {
   final lum = _luminance(p, w, h);
   final r = math.max(8, math.max(w, h) ~/ 24);
-  // Background ≈ bright paper: blur a max-ish version (dilate by blur of lifted values).
-  final bg = _blurLum(lum, w, h, r);
+  final mean = _blurLum(lum, w, h, r);
+  final paper = Float32List(w * h);
+  final mask = Float32List(w * h);
+  for (var j = 0; j < lum.length; j++) {
+    if (lum[j] > mean[j] * 0.92) {
+      paper[j] = lum[j].toDouble();
+      mask[j] = 1;
+    }
+  }
+  final sum = _blur(paper, w, h, r);
+  final cnt = _blur(mask, w, h, r);
   for (var i = 0, j = 0; j < lum.length; i += 4, j++) {
-    final b = math.max(bg[j], 1.0);
-    // Paper tends to be brighter than the local mean (text is sparse) -> scale by ~1.12.
-    final k = 255 / math.min(255.0, b * 1.12);
+    final bg = cnt[j] < 0.05 ? mean[j] : sum[j] / cnt[j];
+    final k = 240 / math.max(bg, 1.0);
     p[i] = _clamp(p[i] * k);
     p[i + 1] = _clamp(p[i + 1] * k);
     p[i + 2] = _clamp(p[i + 2] * k);
@@ -157,13 +168,13 @@ Uint8List applyScanFilter((Uint8List, int, int, int) args) {
       _saturate(p, 1.15);
     case ScanFilter.magic:
       _flattenLighting(p, w, h);
-      final (lo, hi) = _percentiles(_luminance(p, w, h), 0.02, 0.90);
-      _stretch(p, lo, math.max(lo + 30, hi), gamma: 1.15);
-      _saturate(p, 1.35);
+      final (lo, _) = _percentiles(_luminance(p, w, h), 0.01, 0.99);
+      _stretch(p, math.min(lo, 180), 232, gamma: 1.1); // paper (≈240) -> pure white
+      _saturate(p, 1.3);
     case ScanFilter.noShadow:
       _flattenLighting(p, w, h);
       final (lo, _) = _percentiles(_luminance(p, w, h), 0.01, 0.99);
-      _stretch(p, lo, 250);
+      _stretch(p, math.min(lo, 180), 245);
     case ScanFilter.gray:
       final lum = _luminance(p, w, h);
       final (lo, hi) = _percentiles(lum, 0.01, 0.98);
