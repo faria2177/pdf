@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:ui' show Size;
 
 import 'package:flutter/services.dart';
 
@@ -108,6 +109,7 @@ class MethodChannelDoclens extends DoclensPlatform {
     ImageEnhancement enhancement = ImageEnhancement.none,
     AutoOrientation autoOrientation = AutoOrientation.none,
     bool trimShadow = false,
+    Size? quadSpace,
   }) async {
     try {
       final out = await _method.invokeMethod<String>('warpImage', {
@@ -117,6 +119,10 @@ class MethodChannelDoclens extends DoclensPlatform {
         'enhancement': enhancement.name,
         'autoOrientation': autoOrientation.name,
         'trimShadow': trimShadow,
+        if (quadSpace != null && quadSpace.width > 0 && quadSpace.height > 0) ...{
+          'quadSpaceWidth': quadSpace.width,
+          'quadSpaceHeight': quadSpace.height,
+        },
       });
       if (out == null) {
         throw const ScannerCaptureException('Warp returned null path');

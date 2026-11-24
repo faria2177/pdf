@@ -901,6 +901,9 @@ class DocumentEdges {
                 // Camera stills (incl. ID Card mode) often include the
                 // card's cast shadow; imported photos keep their outline.
                 trimShadow: !galleryDetectors,
+                // The quad is in detection.imageSize pixels; the native warp
+                // decodes with its own cap and rescales from this space.
+                quadSpace: detection.imageSize,
               );
             } catch (error) {
               _log(image, 'native warp failed, trying Dart: $error');

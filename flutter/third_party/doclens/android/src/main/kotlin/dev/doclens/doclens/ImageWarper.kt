@@ -141,24 +141,48 @@ object ImageWarper {
         enhancement: String = "none",
         autoOrientation: String = "none",
         trimShadow: Boolean = false,
+        quadSpaceWidth: Float? = null,
+        quadSpaceHeight: Float? = null,
     ): String {
         val upright = ExifRotator.decodeUpright(rawPath)
             ?: throw ScannerException.CaptureFailed("Decode failed: $rawPath")
         try {
-            // The quad is in the upright photo's pixels, like the warp.
+            // Callers' detectors decode the photo themselves (full size, or a
+            // downscaled working copy); this decode is capped at 4096 px. Map
+            // the quad from the space it was measured in to these pixels, or
+            // the crop lands on a scaled-down corner of the photo.
+            val scaled = rescale(quad, quadSpaceWidth, quadSpaceHeight, upright.width, upright.height)
             val target = if (trimShadow) {
                 try {
-                    ShadowEdgeTrim.trimQuad(quad, upright.width, upright.height) { x, y ->
+                    ShadowEdgeTrim.trimQuad(scaled, upright.width, upright.height) { x, y ->
                         upright.getPixel(x, y)
                     }
                 } catch (_: Exception) {
-                    quad
+                    scaled
                 }
-            } else quad
+            } else scaled
             return warp(upright, target, jpegQuality, enhancement, autoOrientation)
         } finally {
             upright.recycle()
         }
+    }
+
+    /** Scales [quad] from a (spaceW x spaceH) pixel space into (w x h); also
+     * accepts a quad that was already normalized to 0..1. */
+    internal fun rescale(quad: Quad, spaceW: Float?, spaceH: Float?, w: Int, h: Int): Quad {
+        val pts = listOf(quad.topLeft, quad.topRight, quad.bottomRight, quad.bottomLeft)
+        val maxX = pts.maxOf { it.x }
+        val maxY = pts.maxOf { it.y }
+        val (sx, sy) = when {
+            spaceW != null && spaceH != null && spaceW > 0f && spaceH > 0f ->
+                Pair(w / spaceW, h / spaceH)
+            maxX <= 1.0001f && maxY <= 1.0001f -> Pair(w.toFloat(), h.toFloat())
+            else -> return quad
+        }
+        if (kotlin.math.abs(sx - 1f) < 1e-4f && kotlin.math.abs(sy - 1f) < 1e-4f) return quad
+        fun s(p: android.graphics.PointF) = android.graphics.PointF(
+            (p.x * sx).coerceIn(0f, w.toFloat()), (p.y * sy).coerceIn(0f, h.toFloat()))
+        return Quad(s(quad.topLeft), s(quad.topRight), s(quad.bottomRight), s(quad.bottomLeft))
     }
 
     /**

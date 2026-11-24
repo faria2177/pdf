@@ -1,1 +1,7 @@
 include: package:flutter_lints/flutter.yaml
+
+analyzer:
+  exclude:
+    # Device-only test; its fixture data is generated in CI.
+    - integration_test/**
+    - third_party/**

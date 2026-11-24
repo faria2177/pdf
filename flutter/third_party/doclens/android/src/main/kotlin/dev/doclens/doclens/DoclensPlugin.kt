@@ -583,6 +583,8 @@ class DoclensPlugin :
         val enhancement = call.argument<String>("enhancement") ?: "none"
         val autoOrientation = call.argument<String>("autoOrientation") ?: "none"
         val trimShadow = call.argument<Boolean>("trimShadow") ?: false
+        val spaceW = call.argument<Number>("quadSpaceWidth")?.toFloat()
+        val spaceH = call.argument<Number>("quadSpaceHeight")?.toFloat()
         if (rawPath == null || quadMap == null) {
             result.error("capture_failed", "Invalid warp args", null); return
         }
@@ -590,7 +592,7 @@ class DoclensPlugin :
             try {
                 val q = Quad.fromMap(quadMap)
                 val out = ImageWarper.warpFile(rawPath, q, quality, enhancement,
-                    autoOrientation, trimShadow)
+                    autoOrientation, trimShadow, spaceW, spaceH)
                 mainHandler.post { result.success(out) }
             } catch (e: Exception) {
                 mainHandler.post { result.error("capture_failed", e.message, null) }

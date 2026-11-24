@@ -1,7 +1,7 @@
 name: pdf_studio
 description: "PDF Studio — a native Flutter PDF reader and page organizer inspired by PdfCraft."
 publish_to: 'none'
-version: 1.6.0+8
+version: 1.6.1+9
 
 environment:
   sdk: ^3.14.0
@@ -34,6 +34,8 @@ dependencies:
 
 dev_dependencies:
   flutter_test:
+    sdk: flutter
+  integration_test:
     sdk: flutter
   flutter_lints: ^6.0.0
 

@@ -200,17 +200,9 @@ class _IdCardPageState extends State<IdCardPage> {
   (double, double) get _pageSize =>
       _layout == CardLayout.sideBySide && _twoSided ? (_paper.h, _paper.w) : (_paper.w, _paper.h);
 
-  /// Draws the whole page at [scale] pixels per point.
-  Future<ui.Image> _compose(double scale) async {
-    final front = await _sideImage(_front);
-    final back = _twoSided ? await _sideImage(_back) : null;
+  /// Card boxes on the page, in points (front first).
+  List<Rect> _slots() {
     final (pw, ph) = _pageSize;
-    final w = (pw * scale).round(), h = (ph * scale).round();
-    final rec = ui.PictureRecorder();
-    final canvas = Canvas(rec);
-    canvas.scale(scale);
-    canvas.drawRect(Rect.fromLTWH(0, 0, pw, ph), Paint()..color = Colors.white);
-
     var cw = _cardW, ch = _cardH;
     if (!_realSize) {
       final maxW = (_layout == CardLayout.sideBySide && _twoSided ? pw / 2 : pw) * 0.82;
@@ -232,6 +224,23 @@ class _IdCardPageState extends State<IdCardPage> {
       slots.add(Rect.fromLTWH(left, ph * 0.35 - ch / 2, cw, ch));
       slots.add(Rect.fromLTWH(left + cw + gap, ph * 0.35 - ch / 2, cw, ch));
     }
+
+    return slots;
+  }
+
+  /// Draws the whole page at [scale] pixels per point.
+  Future<ui.Image> _compose(double scale) async {
+    final front = await _sideImage(_front);
+    final back = _twoSided ? await _sideImage(_back) : null;
+    final (pw, ph) = _pageSize;
+    final w = (pw * scale).round(), h = (ph * scale).round();
+    final rec = ui.PictureRecorder();
+    final canvas = Canvas(rec);
+    canvas.scale(scale);
+    canvas.drawRect(Rect.fromLTWH(0, 0, pw, ph), Paint()..color = Colors.white);
+
+    final slots = _slots();
+    final cw = slots.first.width;
 
     final radius = _rounded ? 3.18 * _mmToPt * (cw / _cardW) : 0.0;
     final sides = [front, if (_twoSided) back];
@@ -403,50 +412,24 @@ class _IdCardPageState extends State<IdCardPage> {
 
   // ------------------------------------------------------------------ UI
 
-  Widget _sideTile(bool front) {
-    final s = front ? _front : _back;
-    final cached = s == null ? null : _rendered[s]?.$3;
-    final scheme = Theme.of(context).colorScheme;
-    return Expanded(
-      child: InkWell(
-        borderRadius: BorderRadius.circular(14),
-        onTap: () => _sideMenu(front),
-        child: Container(
-          height: 112,
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(color: s == null ? scheme.outline : _accent, width: s == null ? 1 : 2),
-            color: scheme.surfaceContainerHighest,
-          ),
-          clipBehavior: Clip.antiAlias,
-          child: s == null
-              ? Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Icon(Icons.add_a_photo_outlined, color: scheme.primary, size: 30),
-                    const SizedBox(height: 6),
-                    Text(front ? 'Scan front' : 'Scan back', style: const TextStyle(fontWeight: FontWeight.w600)),
-                  ],
-                )
-              : Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    if (cached != null) RawImage(image: cached, fit: BoxFit.cover) else const Center(child: CircularProgressIndicator()),
-                    Positioned(
-                      left: 6,
-                      top: 6,
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                        decoration: BoxDecoration(color: _accent, borderRadius: BorderRadius.circular(10)),
-                        child: Text(front ? 'Front ✓' : 'Back ✓', style: const TextStyle(color: Colors.white, fontSize: 11)),
-                      ),
-                    ),
-                    const Positioned(right: 6, top: 6, child: Icon(Icons.more_vert, color: Colors.white)),
-                  ],
-                ),
-        ),
-      ),
-    );
+  /// A tap on the page preview: the card under the finger opens its menu
+  /// (retake, crop, rotate, remove), or scans that side if it is empty.
+  void _tapPreview(Offset pos, Size size) {
+    final (pw, ph) = _pageSize;
+    final pt = Offset(pos.dx / size.width * pw, pos.dy / size.height * ph);
+    final slots = _slots();
+    for (var i = 0; i < slots.length; i++) {
+      if (slots[i].inflate(10).contains(pt)) {
+        _sideMenu(i == 0);
+        return;
+      }
+    }
+    // Outside the cards: scan whatever is still missing.
+    if (_front == null) {
+      _capture(true);
+    } else if (_twoSided && _back == null) {
+      _capture(false);
+    }
   }
 
   @override
@@ -477,21 +460,29 @@ class _IdCardPageState extends State<IdCardPage> {
                 ),
                 child: _preview == null
                     ? Center(child: TextButton.icon(onPressed: _refresh, icon: const Icon(Icons.refresh), label: const Text('Preview')))
-                    : GestureDetector(
-                        onTapUp: (d) {
-                          // tap a card slot to scan it
-                          if (_front == null) {
-                            _capture(true);
-                          } else if (_twoSided && _back == null) {
-                            _capture(false);
-                          }
-                        },
-                        child: RawImage(image: _preview, fit: BoxFit.contain),
+                    : LayoutBuilder(
+                        builder: (context, box) => GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onTapUp: (d) => _tapPreview(d.localPosition, box.biggest),
+                          child: RawImage(image: _preview, fit: BoxFit.contain),
+                        ),
                       ),
               ),
             ),
-            const SizedBox(height: 14),
-            Row(children: [_sideTile(true), if (_twoSided) ...[const SizedBox(width: 12), _sideTile(false)]]),
+            const SizedBox(height: 8),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(Icons.touch_app_outlined, size: 16, color: scheme.onSurfaceVariant),
+                const SizedBox(width: 6),
+                Flexible(
+                  child: Text(
+                    _front == null ? 'Tap the card to scan it' : 'Tap a card to retake, crop, rotate or remove it',
+                    style: TextStyle(fontSize: 12.5, color: scheme.onSurfaceVariant),
+                  ),
+                ),
+              ],
+            ),
             const SectionTitle('Card type'),
             Wrap(
               spacing: 8,

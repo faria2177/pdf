@@ -87,6 +87,11 @@ abstract class DoclensPlatform extends PlatformInterface {
   ///
   /// [trimShadow] first moves sides that follow a cast shadow's outer
   /// border inward onto the document (camera captures only).
+  ///
+  /// [quadSpace] is the pixel size the [quad] coordinates refer to (for
+  /// example `ImageDetection.imageSize`). The native warp decodes the photo
+  /// with its own size cap, so it rescales the quad from this space; without
+  /// it a quad from a differently-sized decode lands on the wrong region.
   Future<String> warpImage({
     required String rawImagePath,
     required Quad quad,
@@ -94,6 +99,7 @@ abstract class DoclensPlatform extends PlatformInterface {
     ImageEnhancement enhancement = ImageEnhancement.none,
     AutoOrientation autoOrientation = AutoOrientation.none,
     bool trimShadow = false,
+    Size? quadSpace,
   });
 
   /// Rotate the JPEG at [imagePath] by [quarterTurns] clockwise 90° steps and

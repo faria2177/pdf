@@ -12,3 +12,4 @@ android/.gradle/
 android/local.properties
 android/key.properties
 **/GeneratedPluginRegistrant.*
+integration_test/scan_fixture_data.dart
