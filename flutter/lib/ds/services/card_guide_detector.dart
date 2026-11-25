@@ -1,12 +1,8 @@
 import 'dart:io';
-import 'dart:math' as math;
-import 'dart:typed_data';
 import 'dart:ui';
 
 import 'package:doclens/doclens.dart';
 import 'package:flutter/foundation.dart';
-import 'package:image/image.dart' as img;
-import 'package:path/path.dart' as p;
 
 import 'document_edges.dart';
 
@@ -30,44 +26,45 @@ class CardGuideDetector {
   /// Detects the card in the guide area of a camera still. Returns null when
   /// nothing card-like is inside the frame.
   static Future<ImageDetection?> detect(String imagePath) async {
+    // A band across the middle of the photo, generous enough for any
+    // screen/photo shape (the exact frame check follows below). Made
+    // natively as a small upright JPEG, so nothing decodes the full photo.
+    const band = Rect.fromLTRB(0, .125, 1, .875);
+    final roi = await DocumentEdges.uprightRegion(imagePath, region: band, maxSide: 1600);
+    if (roi == null) return null;
     try {
-      final bytes = await File(imagePath).readAsBytes();
-      final roi = await compute(_cropWorker, bytes);
-      if (roi == null) return null;
-      final (Uint8List jpeg, int x0, int y0, int rw, int rh, int w, int h) = roi;
-      final file = File(p.join(Directory.systemTemp.path,
-          'ds_card_roi_${DateTime.now().microsecondsSinceEpoch}.jpg'));
-      await file.writeAsBytes(jpeg, flush: true);
-      try {
-        final found = await DocumentEdges.detectSafeStillOutline(file.path,
-            preferIdCardBounds: true);
-        final quad = found?.quad;
-        if (quad == null) return null;
-        final mapped = [
-          for (final pt in quad.points)
-            Offset((x0 + pt.dx * rw) / w, (y0 + pt.dy * rh) / h),
-        ];
-        if (!_insideGuide(mapped, w, h)) {
-          debugPrint('[AutoCrop] card found outside the guide frame; ignored');
-          return null;
-        }
-        return ImageDetection(
-          quad: Quad(
-            topLeft: mapped[0],
-            topRight: mapped[1],
-            bottomRight: mapped[2],
-            bottomLeft: mapped[3],
-          ),
-          imageSize: Size(w.toDouble(), h.toDouble()),
-        );
-      } finally {
-        try {
-          await file.delete();
-        } catch (_) {}
+      final w = roi.fullSize.width.round(), h = roi.fullSize.height.round();
+      // The ID camera UI is portrait-only; a landscape still means the
+      // phone was turned and the frame no longer maps to the photo.
+      if (w > h) return null;
+      final found = await DocumentEdges.detectSafeStillOutline(roi.path,
+          preferIdCardBounds: true);
+      final quad = found?.quad;
+      if (quad == null) return null;
+      final mapped = [
+        for (final pt in quad.points)
+          Offset(pt.dx, band.top + pt.dy * band.height),
+      ];
+      if (!_insideGuide(mapped, w, h)) {
+        debugPrint('[AutoCrop] card found outside the guide frame; ignored');
+        return null;
       }
+      return ImageDetection(
+        quad: Quad(
+          topLeft: mapped[0],
+          topRight: mapped[1],
+          bottomRight: mapped[2],
+          bottomLeft: mapped[3],
+        ),
+        imageSize: Size(w.toDouble(), h.toDouble()),
+      );
     } catch (error) {
       debugPrint('[AutoCrop] guide detection skipped: $error');
       return null;
+    } finally {
+      try {
+        await File(roi.path).delete();
+      } catch (_) {}
     }
   }
 
@@ -108,30 +105,5 @@ class CardGuideDetector {
     area = area.abs() / 2;
     final frame = g.width * g.height;
     return area >= frame * .30 && area <= frame * 2.2;
-  }
-
-  /// Upright decode, then the band around the guide frame as JPEG.
-  static (Uint8List, int, int, int, int, int, int)? _cropWorker(
-      Uint8List bytes) {
-    final decoded = img.decodeImage(bytes);
-    if (decoded == null) return null;
-    final source = img.bakeOrientation(decoded);
-    final w = source.width, h = source.height;
-    // The ID camera UI is portrait-only; a landscape still means the phone
-    // was turned, and the frame no longer maps to the photo.
-    if (w > h) return null;
-    final g = guideRect(w, h);
-    final band = g.height * 1.7;
-    final y0 = math.max(0, (g.center.dy - band / 2).round());
-    final y1 = math.min(h, (g.center.dy + band / 2).round());
-    final roi = img.copyCrop(source, x: 0, y: y0, width: w, height: y1 - y0);
-    // Detectors work on ~1000 px anyway; keep the file light.
-    final scale = math.min(1.0, 2000 / w);
-    final small = scale < 1
-        ? img.copyResize(roi,
-            width: (w * scale).round(),
-            interpolation: img.Interpolation.average)
-        : roi;
-    return (img.encodeJpg(small, quality: 92), 0, y0, w, y1 - y0, w, h);
   }
 }

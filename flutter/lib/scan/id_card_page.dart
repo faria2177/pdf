@@ -518,19 +518,17 @@ class _IdCardPageState extends State<IdCardPage> {
               const SizedBox(height: 12),
               Row(
                 children: [
-                  Expanded(
-                    child: OutlinedButton.icon(
-                      onPressed: _front == null ? null : () => _export('share'),
-                      icon: const Icon(Icons.share),
-                      label: const Text('Share'),
-                    ),
+                  IconButton.outlined(
+                    tooltip: 'Share',
+                    onPressed: _front == null ? null : () => _export('share'),
+                    icon: const Icon(Icons.share_outlined),
                   ),
                   const SizedBox(width: 8),
                   Expanded(
                     child: OutlinedButton.icon(
                       onPressed: _front == null ? null : () => _export('jpg'),
                       icon: const Icon(Icons.image_outlined),
-                      label: const Text('JPG'),
+                      label: const Text('JPG', maxLines: 1, softWrap: false),
                     ),
                   ),
                   const SizedBox(width: 8),
@@ -539,7 +537,7 @@ class _IdCardPageState extends State<IdCardPage> {
                     child: FilledButton.icon(
                       onPressed: _front == null ? () => _capture(true) : () => _export('pdf'),
                       icon: Icon(_front == null ? Icons.document_scanner : Icons.picture_as_pdf),
-                      label: Text(_front == null ? 'Scan front' : 'Save PDF'),
+                      label: Text(_front == null ? 'Scan front' : 'Save PDF', maxLines: 1, softWrap: false),
                     ),
                   ),
                 ],

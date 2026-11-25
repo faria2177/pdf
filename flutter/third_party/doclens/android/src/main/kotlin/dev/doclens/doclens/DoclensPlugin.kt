@@ -150,6 +150,19 @@ class DoclensPlugin :
             }
             "warpImage" -> handleWarp(call, result)
             "rotateImage" -> handleRotate(call, result)
+            "uprightRegion" -> {
+                val path = call.argument<String>("imagePath")
+                if (path == null) { result.success(null); return }
+                val l = call.argument<Number>("left")?.toDouble() ?: 0.0
+                val t = call.argument<Number>("top")?.toDouble() ?: 0.0
+                val r = call.argument<Number>("right")?.toDouble() ?: 1.0
+                val b = call.argument<Number>("bottom")?.toDouble() ?: 1.0
+                val maxSide = call.argument<Int>("maxSide") ?: 1600
+                stillImageExecutor.execute {
+                    val out = try { UprightRegion.extract(context, path, l, t, r, b, maxSide) } catch (_: Throwable) { null }
+                    mainHandler.post { result.success(out) }
+                }
+            }
             "recognizeText" -> handleRecognizeText(call, result)
             "removeSubjectBackground" -> handleRemoveSubjectBackground(call, result)
             "setFlashMode" -> { session?.setFlashMode(call.argument<String>("mode") ?: "auto"); result.success(null) }

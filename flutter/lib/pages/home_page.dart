@@ -55,6 +55,48 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> {
+  /// Paths of Recent entries picked in multi-select mode.
+  final Set<String> _selected = {};
+  bool get _selecting => _selected.isNotEmpty;
+
+  void _toggle(RecentFile r) => setState(() {
+        if (!_selected.remove(r.path)) _selected.add(r.path);
+      });
+
+  List<RecentFile> get _selectedItems =>
+      [for (final r in RecentStore.instance.items) if (_selected.contains(r.path)) r];
+
+  Future<void> _shareSelected() async {
+    final items = [for (final r in _selectedItems) if (File(r.path).existsSync()) r];
+    if (items.isEmpty) return;
+    try {
+      await FileService.shareFiles([for (final r in items) (r.path, r.name)]);
+      if (mounted) setState(_selected.clear);
+    } catch (e) {
+      if (mounted) toast(context, "Couldn't share: $e");
+    }
+  }
+
+  Future<void> _deleteSelected() async {
+    final items = _selectedItems;
+    if (items.isEmpty) return;
+    final ok = await confirm(
+      context,
+      '${items.length} file${items.length == 1 ? '' : 's'} will be deleted from this app. '
+      'Original files you opened elsewhere are not touched.',
+      ok: 'Delete',
+      title: 'Delete files?',
+    );
+    if (!ok) return;
+    for (final r in items) {
+      await RecentStore.instance.remove(r);
+    }
+    if (mounted) {
+      setState(_selected.clear);
+      toast(context, 'Deleted ${items.length} file${items.length == 1 ? '' : 's'}');
+    }
+  }
+
   @override
   void initState() {
     super.initState();
@@ -245,6 +287,10 @@ class _HomePageState extends State<HomePage> {
       canPop: false,
       onPopInvokedWithResult: (didPop, _) async {
         if (didPop) return;
+        if (_selecting) {
+          setState(_selected.clear);
+          return;
+        }
         final exit = await showDialog<bool>(
           context: context,
           builder: (d) => AlertDialog(
@@ -275,17 +321,43 @@ class _HomePageState extends State<HomePage> {
       _Tool(Icons.apps, 'More', 'Images to PDF, Word, Excel, sign…', _more),
     ];
 
+    // Drop selections whose files have gone.
+    _selected.removeWhere((path) => !recent.any((r) => r.path == path));
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('PDF Studio'),
-        actions: [
-          IconButton(
-            tooltip: 'Settings',
-            icon: const Icon(Icons.settings_outlined),
-            onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const SettingsPage())),
-          ),
-        ],
-      ),
+      appBar: _selecting
+          ? AppBar(
+              leading: IconButton(
+                tooltip: 'Cancel',
+                icon: const Icon(Icons.close),
+                onPressed: () => setState(_selected.clear),
+              ),
+              title: Text('${_selected.length} selected'),
+              actions: [
+                IconButton(
+                  tooltip: _selected.length == recent.length ? 'Select none' : 'Select all',
+                  icon: Icon(_selected.length == recent.length ? Icons.deselect : Icons.select_all),
+                  onPressed: () => setState(() {
+                    if (_selected.length == recent.length) {
+                      _selected.clear();
+                    } else {
+                      _selected.addAll(recent.map((r) => r.path));
+                    }
+                  }),
+                ),
+                IconButton(tooltip: 'Share', icon: const Icon(Icons.share_outlined), onPressed: _shareSelected),
+                IconButton(tooltip: 'Delete', icon: const Icon(Icons.delete_outline), onPressed: _deleteSelected),
+              ],
+            )
+          : AppBar(
+              title: const Text('PDF Studio'),
+              actions: [
+                IconButton(
+                  tooltip: 'Settings',
+                  icon: const Icon(Icons.settings_outlined),
+                  onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const SettingsPage())),
+                ),
+              ],
+            ),
       body: CustomScrollView(
         slivers: [
           SliverPadding(
@@ -346,7 +418,13 @@ class _HomePageState extends State<HomePage> {
               child: Row(
                 children: [
                   const Expanded(child: Text('Recent', style: TextStyle(fontWeight: FontWeight.w600))),
-                  if (recent.isNotEmpty)
+                  if (recent.isNotEmpty && !_selecting)
+                    TextButton.icon(
+                      onPressed: () => setState(() => _selected.add(recent.first.path)),
+                      icon: const Icon(Icons.checklist, size: 18),
+                      label: const Text('Select'),
+                    ),
+                  if (recent.isNotEmpty && !_selecting)
                     TextButton(
                       onPressed: () async {
                         if (await confirm(context, 'Remove all recent files from this app?', ok: 'Clear')) {
@@ -371,18 +449,38 @@ class _HomePageState extends State<HomePage> {
               itemCount: recent.length,
               itemBuilder: (context, i) {
                 final r = recent[i];
+                final picked = _selected.contains(r.path);
                 return ListTile(
+                  selected: picked,
+                  selectedTileColor: scheme.secondaryContainer.withValues(alpha: .55),
                   contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
-                  leading: _RecentThumb(key: ValueKey(r.path), item: r),
+                  leading: Stack(
+                    clipBehavior: Clip.none,
+                    children: [
+                      _RecentThumb(key: ValueKey(r.path), item: r),
+                      if (picked)
+                        Positioned(
+                          right: -4,
+                          bottom: -4,
+                          child: CircleAvatar(
+                            radius: 11,
+                            backgroundColor: scheme.primary,
+                            child: Icon(Icons.check, size: 15, color: scheme.onPrimary),
+                          ),
+                        ),
+                    ],
+                  ),
                   title: Text(r.name, maxLines: 1, overflow: TextOverflow.ellipsis),
                   subtitle: Text('${r.ext.toUpperCase()} · ${_size(r.path)}${_ago(r.openedAt)}'),
-                  onTap: () => _openRecent(r),
-                  onLongPress: () => _recentActions(r),
-                  trailing: IconButton(
-                    tooltip: 'Options',
-                    icon: const Icon(Icons.more_vert),
-                    onPressed: () => _recentActions(r),
-                  ),
+                  onTap: () => _selecting ? _toggle(r) : _openRecent(r),
+                  onLongPress: () => _selecting ? _toggle(r) : _recentActions(r),
+                  trailing: _selecting
+                      ? Checkbox(value: picked, onChanged: (_) => _toggle(r))
+                      : IconButton(
+                          tooltip: 'Options',
+                          icon: const Icon(Icons.more_vert),
+                          onPressed: () => _recentActions(r),
+                        ),
                 );
               },
             ),
@@ -416,6 +514,14 @@ class _HomePageState extends State<HomePage> {
               padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
               child: Text(r.name,
                   maxLines: 2, overflow: TextOverflow.ellipsis, style: Theme.of(sheet).textTheme.titleMedium),
+            ),
+            ListTile(
+              leading: const Icon(Icons.checklist),
+              title: const Text('Select multiple'),
+              onTap: () {
+                Navigator.pop(sheet);
+                setState(() => _selected.add(r.path));
+              },
             ),
             ListTile(
               leading: const Icon(Icons.drive_file_rename_outline),
@@ -503,7 +609,7 @@ class _HomePageState extends State<HomePage> {
       return;
     }
     try {
-      await FileService.shareBytes([(await f.readAsBytes(), r.name)], mimeType: FileService.mimeFor(r.name));
+      await FileService.shareFiles([(r.path, r.name)]);
     } catch (e) {
       if (mounted) toast(context, "Couldn't share: $e");
     }

@@ -90,11 +90,62 @@ class FileService {
     return uri != null;
   }
 
-  static Future<void> shareBytes(List<(Uint8List, String)> files, {String mimeType = 'application/pdf'}) async {
-    final xfiles = [
-      for (final (bytes, name) in files) XFile.fromData(bytes, name: safeName(name), mimeType: mimeType),
-    ];
+  /// Shares files under their real names. Data-only XFiles are written by
+  /// the share plugin to random temp names, so the receiving app showed a
+  /// different file name; here every file is written to its own folder with
+  /// exactly the name the user sees.
+  static Future<void> shareBytes(List<(Uint8List, String)> files, {String? mimeType}) async {
+    final dir = await _shareDir();
+    final xfiles = <XFile>[];
+    final used = <String>{};
+    for (final (bytes, name) in files) {
+      final clean = _unique(safeName(name), used);
+      final f = File(p.join(dir.path, clean));
+      await f.writeAsBytes(bytes, flush: true);
+      xfiles.add(XFile(f.path, name: clean, mimeType: mimeType ?? mimeFor(clean)));
+    }
     await SharePlus.instance.share(ShareParams(files: xfiles));
+  }
+
+  /// Shares files already on disk under the given display names.
+  static Future<void> shareFiles(List<(String, String)> files) async {
+    final dir = await _shareDir();
+    final xfiles = <XFile>[];
+    final used = <String>{};
+    for (final (path, name) in files) {
+      final clean = _unique(safeName(name), used);
+      final f = await File(path).copy(p.join(dir.path, clean));
+      xfiles.add(XFile(f.path, name: clean, mimeType: mimeFor(clean)));
+    }
+    if (xfiles.isEmpty) return;
+    await SharePlus.instance.share(ShareParams(files: xfiles));
+  }
+
+  static String _unique(String name, Set<String> used) {
+    var out = name;
+    var i = 2;
+    while (!used.add(out.toLowerCase())) {
+      out = '${p.basenameWithoutExtension(name)} ($i)${p.extension(name)}';
+      i++;
+    }
+    return out;
+  }
+
+  /// A fresh folder per share; older ones are cleaned up.
+  static Future<Directory> _shareDir() async {
+    final root = Directory(p.join((await getTemporaryDirectory()).path, 'share_out'));
+    if (root.existsSync()) {
+      for (final e in root.listSync()) {
+        try {
+          if (DateTime.now().difference(e.statSync().modified).inHours >= 1) {
+            e.deleteSync(recursive: true);
+          }
+        } catch (_) {}
+      }
+    }
+    final dir = Directory(p.join(root.path, DateTime.now().microsecondsSinceEpoch.toString()));
+    await dir.create(recursive: true);
+    return dir;
   }
 
   static String mimeFor(String name) => switch (p.extension(name).toLowerCase()) {

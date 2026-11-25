@@ -1,9 +1,10 @@
 import 'dart:io';
 import 'dart:math' as math;
-import 'dart:ui' show Offset;
+import 'dart:ui' show Offset, Rect, Size;
 
 import 'package:doclens/doclens.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart' show MethodChannel;
 import 'package:path/path.dart' as p;
 
 import 'background_contrast_contour.dart';
@@ -556,15 +557,59 @@ class DocumentEdges {
   /// Camera captures pass false and keep their proven detector chain.
   static Future<ImageDetection?> detectSafeStillOutline(String imagePath,
       {bool preferIdCardBounds = false, bool galleryDetectors = true}) async {
-    final found = await _detectSafeStillOutline(imagePath,
-        preferIdCardBounds: preferIdCardBounds,
-        galleryDetectors: galleryDetectors);
-    // The outline can be a clear sleeve / holder (or a strip of table)
-    // around the card; look for the card's own edge inside it.
-    if (found != null && (preferIdCardBounds || _looksLikeCardOutline(found))) {
-      return CardSleeveRefiner.refine(imagePath, found);
+    // The detectors work at ~1000 px anyway. Decoding a 12–50 MP JPEG in
+    // Dart (several times, once per detector) was most of the 4–5 s wait,
+    // so they get a small upright copy made natively instead. Corners are
+    // normalized, so they apply to the original unchanged.
+    final preview = await uprightRegion(imagePath);
+    final work = preview?.path ?? imagePath;
+    try {
+      var found = await _detectSafeStillOutline(work,
+          preferIdCardBounds: preferIdCardBounds,
+          galleryDetectors: galleryDetectors);
+      // The outline can be a clear sleeve / holder (or a strip of table)
+      // around the card; look for the card's own edge inside it.
+      if (found != null && (preferIdCardBounds || _looksLikeCardOutline(found))) {
+        found = await CardSleeveRefiner.refine(work, found);
+      }
+      if (found != null && preview != null) {
+        found = ImageDetection(quad: found.quad, imageSize: preview.fullSize);
+      }
+      return found;
+    } finally {
+      if (preview != null) {
+        try {
+          await File(preview.path).delete();
+        } catch (_) {}
+      }
     }
-    return found;
+  }
+
+  static const _doclens = MethodChannel('doclens/methods');
+
+  /// Native, EXIF-aware small upright copy of [region] (normalized, in the
+  /// upright image) of a photo, long side at most [maxSide]. Also reports the
+  /// original's full upright size. Null if the platform can't do it.
+  static Future<({String path, Size fullSize})?> uprightRegion(String imagePath,
+      {Rect region = const Rect.fromLTRB(0, 0, 1, 1), int maxSide = 1600}) async {
+    try {
+      final out = await _doclens.invokeMapMethod<String, Object?>('uprightRegion', {
+        'imagePath': imagePath,
+        'left': region.left,
+        'top': region.top,
+        'right': region.right,
+        'bottom': region.bottom,
+        'maxSide': maxSide,
+      });
+      final path = out?['path'] as String?;
+      final w = (out?['fullWidth'] as num?)?.toDouble();
+      final h = (out?['fullHeight'] as num?)?.toDouble();
+      if (path == null || w == null || h == null || w <= 0 || h <= 0) return null;
+      return (path: path, fullSize: Size(w, h));
+    } catch (error) {
+      debugPrint('[AutoCrop] upright preview unavailable: $error');
+      return null;
+    }
   }
 
   static bool _looksLikeCardOutline(ImageDetection detection) {
