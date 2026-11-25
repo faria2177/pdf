@@ -837,7 +837,9 @@ class _CameraScreenState extends State<CameraScreen> {
                       ? _gallery : _importFiles,
                   onImportImages: _gallery,
                   onManualScan: _manual,
-                  onOpenIdCards: _openIdCards,
+                  // PDF Studio has its own ID Card tool on the home screen,
+                  // so Scan shows no ID Cards tab unless a host asks for it.
+                  onOpenIdCards: widget.onOpenIdCards == null ? null : _openIdCards,
                   appBarTitle: widget.side ?? (_batchMode ? 'Batch Scan' : 'DocScanner'),
                   captureHintText: widget.side ?? 'Align all four corners',
                   useLabel: 'Use scan',

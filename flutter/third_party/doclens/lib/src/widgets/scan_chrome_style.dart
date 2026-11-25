@@ -56,8 +56,11 @@ class ScanModeTabs extends StatelessWidget {
         height: 42,
         child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
           _tab('Scan', !idCardsSelected, onScan),
-          const SizedBox(width: ScanChromeStyle.tabGap),
-          _tab('ID Cards', idCardsSelected, onIdCards),
+          // No ID Cards destination: show just the current mode.
+          if (onIdCards != null || idCardsSelected) ...[
+            const SizedBox(width: ScanChromeStyle.tabGap),
+            _tab('ID Cards', idCardsSelected, onIdCards),
+          ],
         ]),
       );
 

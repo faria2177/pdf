@@ -319,7 +319,21 @@ class ScannerSession(
             // thread). Recovers cards whose dark half the edge detector
             // leaves out; see LiveSalientAssist.
             if (rgba != null) salientAssist.offer(rgba, width, height, now)
-            val quad = LiveSalientAssist.combine(edgeQuad, salientAssist.fresh(now))
+            val candidate = LiveSalientAssist.combine(edgeQuad, salientAssist.fresh(now))
+            // No box over empty scenes: the outline must have real edges
+            // under it, in two frames running, before it is shown; a shown
+            // box survives two unsupported frames (a hand passing over).
+            val evidence = candidate != null &&
+                LiveQuadEvidence.supported(candidate, luma, width, height)
+            if (evidence) { evidenceHits++; evidenceMisses = 0 }
+            else { evidenceMisses++; evidenceHits = 0 }
+            val quad = when {
+                candidate == null -> null
+                evidence && (evidenceHits >= 2 || evidenceShown) -> candidate
+                !evidence && evidenceShown && evidenceMisses <= 2 -> candidate
+                else -> null
+            }
+            evidenceShown = quad != null
             // Rotate quad coordinates into the displayed (rotated) coordinate
             // space so that normalized values match what users see.
             val rotated = quad?.let { rotateNormalizedQuad(it, rotation) }
@@ -361,6 +375,10 @@ class ScannerSession(
             proxy.close()
         }
     }
+
+    private var evidenceHits = 0
+    private var evidenceMisses = 0
+    private var evidenceShown = false
 
     @Volatile private var lastLivePaper: Pair<Quad, Long>? = null
 
