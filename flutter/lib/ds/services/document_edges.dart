@@ -561,16 +561,20 @@ class DocumentEdges {
     // Dart (several times, once per detector) was most of the 4–5 s wait,
     // so they get a small upright copy made natively instead. Corners are
     // normalized, so they apply to the original unchanged.
+    final sw = Stopwatch()..start();
     final preview = await uprightRegion(imagePath);
     final work = preview?.path ?? imagePath;
+    _time('preview', sw);
     try {
       var found = await _detectSafeStillOutline(work,
           preferIdCardBounds: preferIdCardBounds,
           galleryDetectors: galleryDetectors);
+      _time('detect', sw);
       // The outline can be a clear sleeve / holder (or a strip of table)
       // around the card; look for the card's own edge inside it.
       if (found != null && (preferIdCardBounds || _looksLikeCardOutline(found))) {
         found = await CardSleeveRefiner.refine(work, found);
+        _time('sleeve', sw);
       }
       if (found != null && preview != null) {
         found = ImageDetection(quad: found.quad, imageSize: preview.fullSize);
@@ -584,6 +588,9 @@ class DocumentEdges {
       }
     }
   }
+
+  static void _time(String stage, Stopwatch sw) =>
+      debugPrint('[AutoCropTime] $stage ${sw.elapsedMilliseconds} ms');
 
   static const _doclens = MethodChannel('doclens/methods');
 
@@ -655,6 +662,7 @@ class DocumentEdges {
     // (the approach modern scanner apps use). It answers only when it sees
     // one clear, four-sided object; otherwise the rectangle detectors below
     // run exactly as before. ID Card mode keeps its dedicated card logic.
+    final sw = Stopwatch()..start();
     SalientResult? salient;
     if (!preferIdCardBounds && galleryDetectors) {
       salient = await SalientDocumentDetector.detectFile(imagePath);
@@ -669,6 +677,7 @@ class DocumentEdges {
     // four edges are confirmed and it is card-shaped.
     if (preferIdCardBounds) {
       salient = await SalientDocumentDetector.detectFile(imagePath);
+      _time('  salient', sw);
       if (salient != null && salient.edgesConfirmed &&
           isCredibleStandaloneCard(salient.detection)) {
         _log(imagePath, 'accepted segmentation-model card outline');
@@ -679,8 +688,10 @@ class DocumentEdges {
     var found = await _detectSafeStillOutlineCoarse(imagePath,
         preferIdCardBounds: preferIdCardBounds,
         galleryDetectors: galleryDetectors);
+    _time('  coarse', sw);
     if (preferIdCardBounds && found == null) {
       found = await _cardCameraFallback(imagePath, salient);
+      _time('  card fallback', sw);
       if (found != null) return found;
     }
     // A sheet photographed from close up runs off the frame; its visible
@@ -711,8 +722,10 @@ class DocumentEdges {
     // tends to land a few percent inside the real paper edge. Snap the
     // accepted outline onto the actual edge pixels; on any doubt this returns
     // the unchanged detection.
-    return _refineSafely(imagePath, found,
+    final refined = await _refineSafely(imagePath, found,
         preferIdCardBounds: preferIdCardBounds);
+    _time('  refine', sw);
+    return refined;
   }
 
   /// The dedicated card chain declined. Run the general page/object chain

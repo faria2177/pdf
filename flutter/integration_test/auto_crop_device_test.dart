@@ -107,6 +107,7 @@ void main() {
           ? await CardGuideDetector.detect(file.path)
           : await DocumentEdges.detectSafeStillOutline(file.path,
               preferIdCardBounds: card);
+      final detectMs = watch.elapsedMilliseconds;
       final quad = detection?.quad;
       final iou = quad == null ? 0.0 : quadIou(quad.points, truth);
       final AutoCropBatch batch;
@@ -138,7 +139,7 @@ void main() {
       print('AUTOCROP ${entry.key} iou=${iou.toStringAsFixed(3)} '
           'ring=${ring.toStringAsFixed(2)} ratio=${ratio.toStringAsFixed(2)}'
           '/${aspect.toStringAsFixed(2)} size=${page?.width}x${page?.height} '
-          'space=${detection?.imageSize} ms=${watch.elapsedMilliseconds} '
+          'space=${detection?.imageSize} detectMs=$detectMs totalMs=${watch.elapsedMilliseconds} '
           'cropped=${batch.croppedCount} quad=${quad?.points.map((p) => '${p.dx.toStringAsFixed(3)},${p.dy.toStringAsFixed(3)}').join(' ')}');
       if (iou < .88 ||
           batch.croppedCount != 1 ||
