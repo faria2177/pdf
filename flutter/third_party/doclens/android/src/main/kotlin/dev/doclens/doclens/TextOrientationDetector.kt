@@ -35,33 +35,47 @@ object TextOrientationDetector {
      * MUST be called off the main thread — it blocks on the recognizer.
      */
     fun bestClockwiseTurns(bitmap: Bitmap): Int {
-        val small = downscale(bitmap, 1000)
+        val small = downscale(bitmap, 800)
+        // ML Kit may still be reading `small` if we bail early; only recycle
+        // it once every recognition has finished.
+        var finished = false
         try {
-            val scores = DoubleArray(4)
+            val scores = DoubleArray(4) { -1.0 }
+            // Cards and pages read along their long side, so a landscape crop
+            // is either upright or upside down, and a portrait crop of a
+            // landscape card is a quarter turn off. Trying only the plausible
+            // turns (and all of them at once) cut the wait after a card
+            // capture from four sequential recognitions to one round.
+            val degrees = when {
+                small.width >= small.height * 1.2 -> intArrayOf(0, 180)
+                small.height >= small.width * 1.2 -> intArrayOf(0, 90, 270)
+                else -> intArrayOf(0, 90, 180, 270)
+            }
             // `InputImage.fromBitmap(bm, rotationDegrees)` follows the CameraX
             // convention: `rotationDegrees` is the *clockwise* rotation that
             // brings the buffer upright, which ML Kit applies before
             // recognition. So if text reads best after rotating `deg`
             // clockwise, that same rotation (deg / 90 turns) is baked into the
             // output.
-            for (deg in intArrayOf(0, 90, 180, 270)) {
+            val pending = degrees.map { deg ->
+                deg to recognizer.process(InputImage.fromBitmap(small, deg))
+            }
+            for ((deg, task) in pending) {
                 val text = try {
-                    Tasks.await(
-                        recognizer.process(InputImage.fromBitmap(small, deg)),
-                        3, TimeUnit.SECONDS,
-                    )
+                    Tasks.await(task, 3, TimeUnit.SECONDS)
                 } catch (_: Exception) {
                     // The recognizer is unavailable (model still downloading on
-                    // demand) or timed out. Bail rather than burn three more
-                    // timeouts on the capture path — leave the crop as-is.
+                    // demand) or timed out — leave the crop as-is.
                     return 0
                 }
                 scores[deg / 90] = scoreOf(text)
             }
+            finished = true
 
             var bestTurns = 0
             var bestScore = scores[0]
             for (t in 1..3) {
+                if (scores[t] < 0) continue
                 if (scores[t] > bestScore) {
                     bestScore = scores[t]
                     bestTurns = t
@@ -82,7 +96,7 @@ object TextOrientationDetector {
                 0
             }
         } finally {
-            if (small !== bitmap) small.recycle()
+            if (finished && small !== bitmap) small.recycle()
         }
     }
 
