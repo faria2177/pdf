@@ -53,11 +53,11 @@ internal object LiveQuadEvidence {
 
     private fun sideScore(
         luma: ByteArray, w: Int, h: Int, ax: Float, ay: Float, dx: Float, dy: Float,
-        nx: Float, ny: Float, shift: Int,
+        nx: Float, ny: Float, shift: Int, t0: Float = 0.1f, t1: Float = 0.9f,
     ): Double {
         var pos = 0; var neg = 0; var total = 0; var offFrame = 0
         for (k in 0 until SAMPLES) {
-            val t = 0.1f + 0.8f * k / (SAMPLES - 1)
+            val t = t0 + (t1 - t0) * k / (SAMPLES - 1)
             val px = ax + dx * t + nx * shift
             val py = ay + dy * t + ny * shift
             val inside = mean(luma, w, h, px, py, nx, ny, 2, 6)
@@ -71,6 +71,46 @@ internal object LiveQuadEvidence {
         if (offFrame > SAMPLES / 2) return 1.0
         if (total < SAMPLES / 3) return 0.0
         return max(pos, neg).toDouble() / total
+    }
+
+    /**
+     * Edge support of each side over the part [t0]..[t1] of its length
+     * (0 = its first corner). Sides: 0 top (TL→TR), 1 right, 2 bottom, 3 left.
+     */
+    fun sideScores(q: Quad, luma: ByteArray, width: Int, height: Int,
+                   t0: Float, t1: Float): DoubleArray {
+        val out = DoubleArray(4) { 1.0 }
+        if (width < 16 || height < 16 || luma.size < width * height) return out
+        val xs = floatArrayOf(q.topLeft.x, q.topRight.x, q.bottomRight.x, q.bottomLeft.x)
+        val ys = floatArrayOf(q.topLeft.y, q.topRight.y, q.bottomRight.y, q.bottomLeft.y)
+        for (i in 0..3) { xs[i] *= width; ys[i] *= height }
+        val cx = xs.average(); val cy = ys.average()
+        for (i in 0..3) {
+            val j = (i + 1) % 4
+            val dx = xs[j] - xs[i]; val dy = ys[j] - ys[i]
+            val len = hypot(dx, dy)
+            if (len < 10f) { out[i] = 0.0; continue }
+            var nx = -dy / len; var ny = dx / len
+            val mx = (xs[i] + xs[j]) / 2; val my = (ys[i] + ys[j]) / 2
+            if ((cx - mx) * nx + (cy - my) * ny < 0) { nx = -nx; ny = -ny }
+            var best = 0.0
+            for (shift in intArrayOf(-3, 0, 3)) {
+                best = max(best, sideScore(luma, width, height, xs[i], ys[i], dx, dy, nx, ny, shift, t0, t1))
+            }
+            out[i] = best
+        }
+        return out
+    }
+
+    /**
+     * How well each corner is backed by real edges: the weaker of its two
+     * sides, measured only on the third of each side nearest the corner.
+     */
+    fun cornerScores(q: Quad, luma: ByteArray, width: Int, height: Int): DoubleArray {
+        val starts = sideScores(q, luma, width, height, 0.04f, 0.34f)
+        val ends = sideScores(q, luma, width, height, 0.66f, 0.96f)
+        // Corner i starts side i and ends side i-1.
+        return DoubleArray(4) { i -> minOf(starts[i], ends[(i + 3) % 4]) }
     }
 
     /** Mean luma along the normal from [from] to [to] px; -1 if off frame. */

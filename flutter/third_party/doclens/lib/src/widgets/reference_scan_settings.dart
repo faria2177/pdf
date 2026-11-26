@@ -33,7 +33,9 @@ class ScanCameraMode {
 /// Persisted preferences live in the host application. The plugin only owns
 /// the scanner UI, so these values can be shared across new CameraX sessions.
 class ReferenceScanSettings extends ChangeNotifier {
-  ScanEffectPreset effect = ScanEffectPreset.enhance;
+  // Scans keep their colours unless the user picks an effect; PDF Studio's
+  // review screen has its own filters.
+  ScanEffectPreset effect = ScanEffectPreset.original;
   String resolution = 'auto';
   ScanOrientationMode orientation = ScanOrientationMode.auto;
   bool autoCapture = false;
@@ -55,10 +57,14 @@ class ReferenceScanSettings extends ChangeNotifier {
 
   factory ReferenceScanSettings.fromJson(Map<String, dynamic> json) {
     final s = ReferenceScanSettings();
-    s.effect = ScanEffectPreset.values.firstWhere(
-      (value) => value.name == json['effect'],
-      orElse: () => ScanEffectPreset.enhance,
-    );
+    // Settings saved before effect v2 carried the old "Enhance" default,
+    // which greyed coloured pages; start those users from Original.
+    s.effect = json['effectVersion'] == 2
+        ? ScanEffectPreset.values.firstWhere(
+            (value) => value.name == json['effect'],
+            orElse: () => ScanEffectPreset.original,
+          )
+        : ScanEffectPreset.original;
     s.resolution = (json['resolution'] as String?) ?? 'auto';
     s.orientation = ScanOrientationMode.values.firstWhere(
       (value) => value.name == json['orientation'],
@@ -78,6 +84,7 @@ class ReferenceScanSettings extends ChangeNotifier {
 
   Map<String, dynamic> toJson() => {
         'effect': effect.name,
+        'effectVersion': 2,
         'resolution': resolution,
         'orientation': orientation.name,
         for (final key in _keys) key: flag(key),
